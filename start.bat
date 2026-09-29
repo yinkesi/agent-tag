@@ -18,7 +18,7 @@ if errorlevel 1 (
 "%CURL%" -s -m 2 -o nul http://127.0.0.1:8091/api/health >nul 2>nul
 if not errorlevel 1 (
   echo 平台已在运行，直接打开页面...
-  start "" http://127.0.0.1:8091
+  start "" chrome http://127.0.0.1:8091 2>nul || start "" http://127.0.0.1:8091
   %WAIT% /t 2 /nobreak >nul
   exit /b 0
 )
@@ -39,5 +39,5 @@ exit /b 1
 
 :ready
 echo 已启动：http://127.0.0.1:8091  （关闭 agent-tag 窗口即停止服务）
-start "" http://127.0.0.1:8091
+start "" chrome http://127.0.0.1:8091 2>nul || start "" http://127.0.0.1:8091
 %WAIT% /t 2 /nobreak >nul

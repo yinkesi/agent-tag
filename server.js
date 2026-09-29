@@ -15,6 +15,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { spawn } = require('child_process');
 
 const PORT = Number(process.env.PORT || 8091);
 const ROOT = __dirname;
@@ -194,15 +195,17 @@ function canReadMessage(a, m) {
 
 function parseMentions(text) {
   const norm = String(text).normalize('NFC'); // 对 NFD 输入免疫（与注册名同口径）
-  const names = Object.keys(db.agents).sort((a, b) => b.length - a.length);
+  const names = Object.keys(db.agents).sort((a, b) => b.length - a.length); // 最长优先
   const found = new Set();
-  for (const n of names) {
-    const at = '@' + n;
-    let idx = norm.indexOf(at);
-    while (idx !== -1) {
-      found.add(n); // 只要 @到了名字就算（最长名优先，避免“小王”吃到“小王小李”）
-      idx = norm.indexOf(at, idx + at.length);
+  let i = 0;
+  while (i < norm.length) {
+    if (norm[i] !== '@') { i++; continue; }
+    let hit = null;
+    for (const n of names) {
+      // 同一 @ 位置只认最长的名字（防「@abc2」误伤「@abc」），命中即消费整段
+      if (norm.startsWith('@' + n, i)) { hit = n; break; }
     }
+    if (hit) { found.add(hit); i += 1 + hit.length; } else i++;
   }
   return [...found];
 }
@@ -492,6 +495,44 @@ async function route(req, res) {
     }
 
     /* ---- 名册（公开） ---- */
+    /* ---- 一键接上本地模型（spawn bridge-agent 子进程，网页「添加 agent」用）---- */
+    const spawned = new Map(); // name -> child（内存态；server 重启后桥进程自然脱离管理）
+    if (p === '/api/agents/spawn-bridge' && method === 'POST') {
+      const name = String(body.name || '').normalize('NFC');
+      const target = db.agents[name];
+      if (!target || target.kind !== 'agent') return json(res, 404, { error: '先注册该 agent 再接模型' });
+      if (body.stop) {
+        const child = spawned.get(name);
+        if (!child) return json(res, 404, { error: '没有由本服务拉起的桥进程' });
+        try { child.kill(); } catch {}
+        spawned.delete(name);
+        return json(res, 200, { ok: true, stopped: true });
+      }
+      if (spawned.has(name)) return json(res, 200, { ok: true, already: true });
+      const baseUrl = String(body.baseUrl || 'http://127.0.0.1:8080/v1').replace(/\/$/, '');
+      const model = String(body.model || 'MiniCPM5-2B');
+      // 先探活 LLM 服务，避免起了桥却每次调用都失败
+      const probe = await new Promise((resolve) => {
+        const u = new URL(baseUrl + '/models');
+        const r = (u.protocol === 'https:' ? require('https') : http).get(u, { timeout: 2500 }, (rs) => { rs.resume(); resolve(rs.statusCode < 500); });
+        r.on('timeout', () => { r.destroy(); resolve(false); });
+        r.on('error', () => resolve(false));
+      });
+      if (!probe) return json(res, 502, { error: `模型服务 ${baseUrl} 未响应。先双击 demo.bat（或 start_server）把本地模型跑起来再接。` });
+      const child = spawn(process.execPath, [
+        path.join(ROOT, 'bridge-agent.js'),
+        '--name', name, '--base-url', baseUrl, '--model', model,
+        '--token', target.token, // 持该 agent 的 token 注册，避免 409
+        '--persona', target.persona || `${name}（本地模型驱动）`,
+        '--hello', '0',
+      ], { detached: true, stdio: 'ignore', cwd: ROOT });
+      child.unref();
+      spawned.set(name, child);
+      child.on('exit', () => spawned.delete(name));
+      touchPresence(name); // 桥进程已启动，很快会有轮询；先亮灯
+      return json(res, 200, { ok: true, baseUrl, model });
+    }
+
     if (p === '/api/agents' && method === 'GET') {
       return json(res, 200, { agents: Object.values(db.agents).map(pubAgent) });
     }

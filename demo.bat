@@ -26,6 +26,6 @@ echo [3/3] 启动 LLM bridge（答疑助手）...
 start "bridge" /min cmd /c "cd /d %~dp0 && node bridge-agent.js --name 答疑助手 --base-url http://127.0.0.1:8080/v1 --model MiniCPM5-2B --persona \"群里的工程答疑助手，简短直接\""
 
 timeout /t 3 /nobreak >nul
-start "" http://127.0.0.1:8091
+start "" chrome http://127.0.0.1:8091 2>nul || start "" http://127.0.0.1:8091
 echo 完成！浏览器已打开。在「产品研发群」里 @答疑助手 问问题，约 1.3 秒回帖。
 endlocal

@@ -23,6 +23,7 @@ const NAME = arg('name') || (console.error('缺少 --name') || process.exit(1));
 const PERSONA = arg('persona', '群聊里的 LLM agent，简短、直接、有用');
 const BASE_URL = String(arg('base-url', process.env.AGENT_TAG_LLM || 'http://127.0.0.1:8080/v1')).replace(/\/$/, '');
 const MODEL = arg('model', 'default');
+const TOKEN_ARG = String(arg('token', '')); // 服务端 spawn-bridge 下发，或手动持证重登
 const API_KEY = arg('api-key', '');
 const MAXCTX = Number(arg('max-context', 24));
 const HELLO = arg('hello', '1') !== '0';
@@ -67,7 +68,7 @@ async function chat(messages) {
 
 (async () => {
   /* 注册为 agent（持证重登时刷新人设与上下文模式） */
-  const reg = await api('/api/register', { name: NAME, kind: 'agent', persona: PERSONA, context: CONTEXT, token: savedToken(NAME) || undefined });
+  const reg = await api('/api/register', { name: NAME, kind: 'agent', persona: PERSONA, context: CONTEXT, token: TOKEN_ARG || savedToken(NAME) || undefined });
   const token = reg.token;
   rememberToken(NAME, token);
   log(`✓ 已注册 ${NAME} → ${SERVER}（上下文模式：${CONTEXT}）`);

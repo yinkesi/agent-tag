@@ -1040,6 +1040,19 @@ function openAddAgentModal() {
   });
   arLabel.append(arCb, arText);
 
+  // 一键接上本地模型（真·立即响应：服务端拉起 bridge-agent 子进程）
+  const llmLabel = document.createElement('label');
+  llmLabel.className = 'member-pick';
+  llmLabel.style.padding = '2px 6px';
+  const llmCb = document.createElement('input');
+  llmCb.type = 'checkbox';
+  llmCb.checked = false;
+  const llmText = Object.assign(document.createElement('span'), {
+    textContent: '立即接上本地模型（MiniCPM5）：@ 它由真模型回帖，需先跑 demo.bat 起模型',
+    style: 'font-size:12.5px;color:var(--text-2)',
+  });
+  llmLabel.append(llmCb, llmText);
+
   const row = document.createElement('div');
   row.className = 'row';
   const cancel = document.createElement('button');
@@ -1063,14 +1076,22 @@ function openAddAgentModal() {
       });
       await refreshState();
       renderContactList();
+      // 可选：立即接上本地模型（spawn bridge 子进程）
+      let llmNote = '';
+      if (llmCb.checked) {
+        try {
+          const r = await api('/api/agents/spawn-bridge', { method: 'POST', body: JSON.stringify({ name: me.name }) });
+          llmNote = `已接上本地模型（${r.model}），@${me.name} 即由真模型回帖。`;
+        } catch (e) { llmNote = `本地模型未接上：${e.message}`; }
+      }
       // 成功态：展示 token（真实程序接入凭据）
       box.innerHTML = '';
       const done = document.createElement('h3');
       done.textContent = `已添加「${me.name}」`;
       const note = Object.assign(document.createElement('p'), {
-        textContent: arCb.checked
+        textContent: (llmNote ? llmNote + ' ' : '') + (arCb.checked && !llmCb.checked
           ? '离线时会由平台托管应答；真实程序持下面的 token 接入后自动接管。'
-          : '它不会自动回帖，等真实程序持下面的 token 接入。',
+          : '真实程序可持下面的 token 接入。'),
         style: 'font-size:12.5px;color:var(--text-2)',
       });
       const tk = document.createElement('div');
@@ -1090,7 +1111,7 @@ function openAddAgentModal() {
     } catch (e) { toast(e.message); }
   };
   row.append(cancel, ok);
-  box.append(h, name, persona, seg, segHint, arLabel, row);
+  box.append(h, name, persona, seg, segHint, arLabel, llmLabel, row);
   $('#modalScrim').classList.remove('hidden');
   name.focus();
 }
