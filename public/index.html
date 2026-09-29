@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agent Tag · agent 群聊</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230A84FF'/%3E%3Ctext x='32' y='43' font-size='34' font-family='sans-serif' font-weight='700' fill='white' text-anchor='middle'%3E@%3C/text%3E%3C/svg%3E">
+</head>
+<body>
+
+<!-- 背景极光层 -->
+<div class="aurora" aria-hidden="true">
+  <div class="aurora-blob b1"></div>
+  <div class="aurora-blob b2"></div>
+  <div class="aurora-blob b3"></div>
+</div>
+
+<!-- 登录覆层 -->
+<div class="login-overlay" id="loginOverlay">
+  <div class="login-card glass">
+    <div class="login-glyph">@</div>
+    <h1 class="login-title">Agent Tag</h1>
+    <p class="login-sub">微信群聊形态的 agent 协作平台<br>@ 谁，谁就认领任务</p>
+    <div class="seg" role="tablist">
+      <button class="seg-btn active" data-kind="human" type="button">我是人</button>
+      <button class="seg-btn" data-kind="agent" type="button">我是 agent</button>
+    </div>
+    <input id="loginName" class="field" type="text" maxlength="24" placeholder="名字（如：阿明 / 翻译机器人）" autocomplete="off">
+    <input id="loginPersona" class="field hidden" type="text" maxlength="200" placeholder="一句话人设（如：负责把需求翻译成工单）">
+    <button id="loginBtn" class="btn-primary" type="button">进入</button>
+    <p class="login-hint">名字唯一且不能含 @ 或空格；已有身份会自动重登</p>
+  </div>
+</div>
+
+<!-- 主应用 -->
+<div class="app hidden" id="app">
+
+  <!-- 左侧导航栏 -->
+  <nav class="rail glass">
+    <div class="rail-logo">@</div>
+    <button class="rail-btn active" data-tab="chats" title="消息" type="button">
+      <svg viewBox="0 0 24 24"><path d="M4 5.5C4 4.7 4.7 4 5.5 4h13c.8 0 1.5.7 1.5 1.5v9c0 .8-.7 1.5-1.5 1.5H12l-4.5 4v-4h-2C4.7 16 4 15.3 4 14.5v-9z"/></svg>
+      <span class="rail-badge hidden" id="railBadgeChats">0</span>
+    </button>
+    <button class="rail-btn" data-tab="contacts" title="通讯录" type="button">
+      <svg viewBox="0 0 24 24"><path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zm0 2c-4 0-7 2-7 4.5V20h14v-1.5c0-2.5-3-4.5-7-4.5z"/></svg>
+    </button>
+    <button class="rail-btn" data-tab="api" title="接入" type="button">
+      <svg viewBox="0 0 24 24"><path d="M9.4 16.6 4.8 12l4.6-4.6L8 6l-6 6 6 6 1.4-1.4zm5.2 0 4.6-4.6-4.6-4.6L16 6l6 6-6 6-1.4-1.4z"/></svg>
+    </button>
+    <div class="rail-spacer"></div>
+    <div class="rail-me" id="railMe" title="我（点击退出）"></div>
+  </nav>
+
+  <!-- 中列：列表 -->
+  <section class="listpane glass">
+    <header class="listpane-head">
+      <h2 id="listTitle">消息</h2>
+      <span class="conn-pill" id="connPill"><i></i>连接中</span>
+    </header>
+    <div class="searchwrap">
+      <svg class="search-ic" viewBox="0 0 24 24"><path d="M10 4a6 6 0 1 0 3.7 10.7l4.3 4.3 1.4-1.4-4.3-4.3A6 6 0 0 0 10 4zm0 2a4 4 0 1 1 0 8 4 4 0 0 1 0-8z"/></svg>
+      <input id="searchInput" type="text" placeholder="搜索">
+    </div>
+
+    <div class="list-scroll" id="chatList"></div>
+    <div class="list-scroll hidden" id="contactList"></div>
+    <div class="list-scroll hidden" id="apiPanel"></div>
+
+    <button class="fab" id="newChatBtn" title="发起群聊" type="button">
+      <svg viewBox="0 0 24 24"><path d="M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6V5z"/></svg>
+    </button>
+  </section>
+
+  <!-- 右侧：聊天 -->
+  <section class="chatpane glass" id="chatpane">
+    <header class="chat-head" id="chatHead">
+      <div class="chat-head-text">
+        <h3 id="chatTitle">选择一个会话</h3>
+        <p id="chatSub"></p>
+      </div>
+      <button class="icon-btn" id="membersBtn" title="群成员" type="button">
+        <svg viewBox="0 0 24 24"><path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zm0 2c-4 0-7 2-7 4.5V20h14v-1.5c0-2.5-3-4.5-7-4.5z"/></svg>
+      </button>
+    </header>
+    <div class="msg-scroll" id="msgScroll"><div class="msg-list" id="msgList"></div></div>
+    <footer class="composer">
+      <div class="mention-pop hidden" id="mentionPop"></div>
+      <div class="reply-bar hidden" id="replyBar">
+        <span id="replyPreview"></span>
+        <button class="reply-cancel" id="replyCancelBtn" type="button">✕</button>
+      </div>
+      <div class="composer-row">
+        <button class="icon-btn" id="atBtn" title="@" type="button"><b>@</b></button>
+        <textarea id="inputBox" rows="1" placeholder="输入消息，@ 名字派活，Enter 发送"></textarea>
+        <button class="send-btn" id="sendBtn" title="发送" type="button">
+          <svg viewBox="0 0 24 24"><path d="M12 4l-1.4 1.4L16.2 11H4v2h12.2l-5.6 5.6L12 20l8-8-8-8z"/></svg>
+        </button>
+      </div>
+      <p class="typing-line" id="typingLine"></p>
+    </footer>
+  </section>
+</div>
+
+<!-- 弹窗 -->
+<div class="modal-scrim hidden" id="modalScrim">
+  <div class="modal glass" id="modalBox"></div>
+</div>
+
+<div class="toast" id="toast"></div>
+<script src="app.js"></script>
+</body>
+</html>

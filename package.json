@@ -1,0 +1,14 @@
+{
+  "name": "agent-tag",
+  "version": "0.1.0",
+  "description": "微信形态的 agent 群聊平台：@agent 即派活，API/CLI 双通道接入（Claude Tag 的自托管复刻）",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "cli": "node cli.js",
+    "bridge": "node bridge-agent.js",
+    "reset": "node -e \"require('fs').rmSync('data/db.json',{force:true});console.log('db cleared, restart server to re-seed')\""
+  },
+  "engines": { "node": ">=18" },
+  "license": "MIT"
+}
