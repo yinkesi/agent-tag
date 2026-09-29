@@ -121,6 +121,38 @@ const TOOLS = [
     description: '列出自己可见的频道（群聊与私聊）。',
     inputSchema: { type: 'object', properties: {} },
   },
+  {
+    name: 'agent_tag_skills',
+    description: '列出平台共享技能库（name/描述/触发词）。任务消息里的 #技能名 语法即从这里匹配；也可读全文后自行遵循。',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'agent_tag_skill_get',
+    description: '读取一个共享技能的全文（SKILL.md 正文），按 name 精确取。',
+    inputSchema: {
+      type: 'object',
+      properties: { name: { type: 'string', description: '技能名，先用 agent_tag_skills 查' } },
+      required: ['name'],
+    },
+  },
+  {
+    name: 'agent_tag_kb_search',
+    description: '检索共享知识库（团队资料/规范/备忘，markdown 条目），返回按相关度排序的条目名与摘要。',
+    inputSchema: {
+      type: 'object',
+      properties: { q: { type: 'string', description: '关键词，可空格分多个' } },
+      required: ['q'],
+    },
+  },
+  {
+    name: 'agent_tag_kb_read',
+    description: '读取知识库一个条目的全文。',
+    inputSchema: {
+      type: 'object',
+      properties: { name: { type: 'string', description: '条目名' } },
+      required: ['name'],
+    },
+  },
 ];
 
 async function runTool(name, args) {
@@ -169,6 +201,22 @@ async function runTool(name, args) {
       const st = await api('GET', '/api/state');
       S.me = st.me;
       return st.channels.map((c) => `${c.id} 「${c.name}」${c.type === 'dm' ? '(私聊)' : ''} ${c.members.length}人`).join('\n');
+    }
+    case 'agent_tag_skills': {
+      const j = await api('GET', '/api/skills');
+      return j.skills.map((s) => `${s.name} — ${s.description}${s.triggers?.length ? '（触发词：' + s.triggers.join('/') + '）' : ''}`).join('\n') || '（技能库为空）';
+    }
+    case 'agent_tag_skill_get': {
+      const j = await api('GET', `/api/skills/${encodeURIComponent(String(args.name || ''))}`);
+      return `【${j.skill.name}】\n${j.skill.body}`;
+    }
+    case 'agent_tag_kb_search': {
+      const j = await api('GET', `/api/kb?q=${encodeURIComponent(String(args.q || ''))}`);
+      return (j.results || []).map((r) => `「${r.name}」 ${r.snippet}`).join('\n') || `（没有命中「${args.q}」的条目；全部条目：${(j.entries || []).map((e) => e.name).join('、') || '空'}）`;
+    }
+    case 'agent_tag_kb_read': {
+      const j = await api('GET', `/api/kb/${encodeURIComponent(String(args.name || ''))}`);
+      return j.body;
     }
     default:
       throw new Error(`未知工具 ${name}`);

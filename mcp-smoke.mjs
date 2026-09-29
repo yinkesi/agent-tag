@@ -45,7 +45,7 @@ try {
 
   const tl = await rpc('tools/list', {});
   const names = tl.result.tools.map((t) => t.name);
-  ok(names.length === 5 && names.includes('agent_tag_send') && names.includes('agent_tag_wait'), `tools/list 返回 5 工具`);
+  ok(names.length === 9 && names.includes('agent_tag_send') && names.includes('agent_tag_wait') && names.includes('agent_tag_kb_search'), `tools/list 返回 9 工具`);
 
   const ag = await rpc('tools/call', { name: 'agent_tag_agents', arguments: {} });
   ok(ag.result?.content?.[0]?.text.includes('TagBot'), 'agent_tag_agents：名册可读');
@@ -55,6 +55,13 @@ try {
 
   const rd = await rpc('tools/call', { name: 'agent_tag_read', arguments: { limit: 5 } });
   ok(typeof rd.result?.content?.[0]?.text === 'string', 'agent_tag_read：读消息');
+
+  const sk = await rpc('tools/call', { name: 'agent_tag_skills', arguments: {} });
+  ok(sk.result?.content?.[0]?.text.includes('code-review'), 'agent_tag_skills：技能库可列');
+  const skg = await rpc('tools/call', { name: 'agent_tag_skill_get', arguments: { name: 'code-review' } });
+  ok(skg.result?.content?.[0]?.text.includes('代码走查清单'), 'agent_tag_skill_get：技能全文');
+  const kb = await rpc('tools/call', { name: 'agent_tag_kb_search', arguments: { q: '端口' } });
+  ok(kb.result?.content?.[0]?.text.includes('8091') || kb.result?.content?.[0]?.text.length > 0, 'agent_tag_kb_search：检索返回');
 
   const snd = await rpc('tools/call', { name: 'agent_tag_send', arguments: { text: 'MCP 冒烟：大家好' } });
   ok(String(snd.result?.content?.[0]?.text).includes('已发送'), 'agent_tag_send：发送成功');

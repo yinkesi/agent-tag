@@ -112,8 +112,9 @@ function runCli(task) {
 (async () => {
   const reg = await api('/api/register', { name: NAME, kind: 'agent', persona: PERSONA, token: TOKEN_ARG || savedToken(NAME) || undefined });
   const token = reg.token;
+  const ME = reg.me || {}; // 含默认技能 skills[]
   rememberToken(NAME, token);
-  log(`✓ 已注册 ${NAME} → ${SERVER}`);
+  log(`✓ 已注册 ${NAME} → ${SERVER}${(ME.skills || []).length ? `（默认技能：${ME.skills.join('、')}）` : ''}`);
 
   const state = await api(`/api/state?token=${encodeURIComponent(token)}`, null, 'GET');
   const channels = state.channels.filter((c) => {
@@ -142,13 +143,23 @@ function runCli(task) {
         if (!(m.mentions || []).includes(NAME)) continue;
         // 先回执再干活（学 TagIt/open-tag 的 ack）：CLI 冷启动+推理可达数十秒，静默太久
         api('/api/messages', { token, channel: m.channel, text: `🫡 收到 @${m.from} 的任务，入队执行中（底层 \`${CMD}\`，完成即回帖）` }).catch(() => {});
+        // 任务文本 = 原文去 @前缀 + 消息携带技能(#标签)与默认技能的全文注入 + 知识库指引
+        const skillNames = [...new Set([...(m.skills || []), ...(ME.skills || [])])];
+        let skillBlock = '';
+        for (const sn of skillNames) {
+          try {
+            const r = await api(`/api/skills/${encodeURIComponent(sn)}`, null, 'GET');
+            if (r.skill) skillBlock += `\n\n【技能 ${r.skill.name}】\n${r.skill.body}`;
+          } catch {}
+        }
+        const kbHint = `\n\n【共享知识库】团队资料可检索：GET ${SERVER}/api/kb?q=关键词（列表 GET /api/kb，全文 GET /api/kb/条目名），按需自行查询。`;
         queue.push({
           id: m.seq,
           channel: m.channel,
           channelName: byId.get(m.channel).name,
           from: m.from,
-          // 去掉 @自己 的前缀，剩下的就是任务
-          text: m.text.replace(new RegExp(`@${NAME}`, 'g'), '').trim() || '（没有任务描述，请汇报你的能力）',
+          text: (m.text.replace(new RegExp(`@${NAME}`, 'g'), '').trim() || '（没有任务描述，请汇报你的能力）')
+            + (skillBlock || '') + kbHint,
         });
       }
       // 单并发执行：CLI agent 一般独占一个工作区

@@ -216,6 +216,35 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     cliReply ? '' : JSON.stringify((await api('GET', `/api/messages?channel=general&limit=10`, null, ht)).json.messages?.slice(-5).map((m) => ({ from: m.from, text: m.text.slice(0, 30) }))));
   await api('POST', '/api/agents/spawn-cli', { name: `钳工${rand}`, stop: true }, ht);
 
+  /* 20. 共享技能库 / 知识库 / #标签携带 */
+  const sk = await api('GET', '/api/skills');
+  ok(sk.json.skills.some((s) => s.name === 'code-review'), '技能库可列出（含示例 code-review）');
+  const skg = await api('GET', '/api/skills/code-review');
+  ok(skg.json.skill?.body?.includes('代码走查清单'), '技能全文可读');
+  const kb = await api('GET', '/api/kb?q=端口');
+  ok(kb.json.results?.length > 0 && kb.json.results[0].name.length > 0, '知识库关键词检索命中');
+  const kbg = await api('GET', '/api/kb/' + encodeURIComponent(kb.json.results[0].name));
+  ok(kbg.json.body?.includes('8091'), '知识库条目全文可读');
+  const tagMsg = await api('POST', '/api/messages', { channel: 'general', text: `#code-review 顺带 #不存在的标签 测试携带` }, ht);
+  ok(tagMsg.json.message?.skills?.includes('code-review') && !tagMsg.json.message.skills.includes('不存在的标签'),
+    '#标签解析：命中技能库才算携带');
+
+  /* 21. #携带技能 → CLI agent 任务注入（fake-agent 回显任务文本，直接证明注入） */
+  const injAg = await api('POST', '/api/register', { name: `注入工${rand}`, kind: 'agent' }, ht);
+  await api('POST', '/api/agents/spawn-cli', { name: `注入工${rand}`, cmd: 'node test/fake-agent.mjs' }, ht);
+  const tInj = Date.now();
+  await api('POST', '/api/messages', { channel: 'general', text: `@注入工${rand} #code-review 检查一下` }, ht);
+  let injReply = null;
+  for (let i = 0; i < 20 && !injReply; i++) {
+    await sleep(500);
+    const d = await api('GET', `/api/messages?channel=general&limit=8`, null, ht);
+    const arr = d && d.json && d.json.messages;
+    if (!Array.isArray(arr)) continue;
+    injReply = arr.find((m) => m.from === `注入工${rand}` && m.ts > tInj && m.text.includes('代码走查清单'));
+  }
+  ok(!!injReply, '#技能 派活 → 技能全文注入进 CLI 任务');
+  await api('POST', '/api/agents/spawn-cli', { name: `注入工${rand}`, stop: true }, ht);
+
   console.log(`\n结果：${pass} 通过，${fail} 失败`);
   process.exit(fail ? 1 : 0);
 })().catch((e) => { console.error('测试脚本异常:', e); process.exit(1); });

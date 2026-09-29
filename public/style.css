@@ -431,6 +431,8 @@ button, .field, textarea { transition: transform 100ms ease-out, background 160m
   padding: 0 5px; border-radius: 6px; font-weight: 600;
 }
 .msg.mine .bubble .mention { color: #fff; background: rgba(255, 255, 255, 0.22); }
+.bubble .mention.skill-tag { color: #bf5af2; background: rgba(191, 90, 242, 0.16); }
+.msg.mine .bubble .mention.skill-tag { color: #fff; background: rgba(255, 255, 255, 0.22); }
 .msg-time { font-size: 10.5px; color: var(--text-3); padding: 0 4px; }
 
 .sysmsg {

@@ -22,6 +22,8 @@ const ROOT = __dirname;
 const DATA_DIR = path.join(ROOT, 'data');
 const DB_FILE = path.join(DATA_DIR, 'db.json');
 const PUBLIC_DIR = path.join(ROOT, 'public');
+const SKILLS_DIR = path.join(ROOT, 'skills'); // 共享技能库：一技能一目录(SKILL.md)或单 md，放进去即可用
+const KB_DIR = path.join(ROOT, 'kb');         // 共享知识库：markdown，文件名即条目名
 
 const ONLINE_TTL_MS = 30_000;     // 超过该时长无心跳/SSE 视为离线
 const EVENT_RING = 2000;          // 内存事件环形缓冲上限
@@ -157,6 +159,102 @@ function pushEvent(evt) {
 
 function channelOf(id) { return db.channels[id]; }
 
+/* ---------------- 共享技能库 / 知识库（学自 Open Design：目录即注册表，frontmatter 元数据） ---------------- */
+
+function parseFrontmatter(text) {
+  const m = String(text).match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
+  if (!m) return { meta: {}, body: String(text) };
+  const meta = {};
+  for (const line of m[1].split(/\r?\n/)) {
+    const kv = line.match(/^([A-Za-z_-]+):\s*(.*)$/);
+    if (!kv) continue;
+    const v = kv[2].trim();
+    meta[kv[1]] = v.startsWith('[') && v.endsWith(']')
+      ? v.slice(1, -1).split(',').map((s) => s.trim()).filter(Boolean) // triggers: [a, b]
+      : v;
+  }
+  return { meta, body: m[2] };
+}
+
+const skillCache = { at: 0, items: [] };
+
+function listSkills() {
+  if (Date.now() - skillCache.at < 3000 && skillCache.items.length) return skillCache.items; // 3s TTL，目录改动近乎即时生效
+  const items = [];
+  try {
+    for (const e of fs.readdirSync(SKILLS_DIR, { withFileTypes: true })) {
+      if (e.name.startsWith('_') || e.name.startsWith('.')) continue;
+      let file = null, name = e.name.replace(/\.md$/i, '');
+      if (e.isFile() && e.name.toLowerCase().endsWith('.md')) file = path.join(SKILLS_DIR, e.name);
+      else if (e.isDirectory() && fs.existsSync(path.join(SKILLS_DIR, e.name, 'SKILL.md'))) {
+        file = path.join(SKILLS_DIR, e.name, 'SKILL.md');
+      }
+      if (!file) continue;
+      try {
+        const { meta, body } = parseFrontmatter(fs.readFileSync(file, 'utf8'));
+        items.push({
+          name: String(meta.name || name).trim(),
+          description: String(meta.description || body.slice(0, 80).replace(/\n/g, ' ')).trim(),
+          triggers: Array.isArray(meta.triggers) ? meta.triggers : [],
+          body: body.trim(),
+        });
+      } catch {}
+    }
+  } catch {}
+  skillCache.at = Date.now();
+  skillCache.items = items;
+  return items;
+}
+
+function getSkill(name) { return listSkills().find((s) => s.name === name) || null; }
+
+function kbEntries() {
+  const out = [];
+  try {
+    for (const f of fs.readdirSync(KB_DIR, { withFileTypes: true })) {
+      if (!f.isFile() || !f.name.toLowerCase().endsWith('.md')) continue;
+      try { out.push({ name: f.name.replace(/\.md$/i, ''), file: path.join(KB_DIR, f.name) }); } catch {}
+    }
+  } catch {}
+  return out;
+}
+
+function kbSearch(q, limit = 5) {
+  const kw = String(q || '').trim().toLowerCase();
+  const terms = kw.split(/\s+/).filter(Boolean);
+  const scored = [];
+  for (const e of kbEntries()) {
+    let body = '';
+    try { body = fs.readFileSync(e.file, 'utf8'); } catch { continue; }
+    const hay = (e.name + '\n' + body).toLowerCase();
+    let score = 0;
+    for (const t of terms) {
+      if (e.name.toLowerCase().includes(t)) score += 5;
+      const n = hay.split(t).length - 1;
+      score += Math.min(n, 10);
+    }
+    if (score > 0) scored.push({ score, name: e.name, snippet: body.replace(/^#.*\n+/, '').replace(/\s+/g, ' ').slice(0, 160) });
+  }
+  return scored.sort((a, b) => b.score - a.score).slice(0, limit);
+}
+
+function parseSkillTags(text) {
+  // #标签：仅命中技能库里的名字才算携带（同 @ 的消费式匹配，防误伤普通话题标签）
+  const norm = String(text).normalize('NFC');
+  const names = listSkills().map((s) => s.name).sort((a, b) => b.length - a.length);
+  const found = new Set();
+  let i = 0;
+  while (i < norm.length) {
+    if (norm[i] !== '#') { i++; continue; }
+    let hit = null;
+    for (const n of names) {
+      if (norm.startsWith('#' + n, i)) { hit = n; break; }
+    }
+    if (hit) { found.add(hit); i += 1 + hit.length; } else i++;
+  }
+  return [...found];
+}
+
 function visibleTo(name, evt) {
   if (!name) return false;
   if (evt.type === 'presence' || evt.type === 'channel') return true;
@@ -212,6 +310,7 @@ function parseMentions(text) {
 }
 
 function addMessage(channel, from, text, opts = {}) {
+  const skills = opts.kind ? [] : parseSkillTags(text); // #技能名 → 消息携带技能（与 @ 并列的消息语法）
   const msg = {
     seq: nextSeq(),
     channel,
@@ -219,6 +318,7 @@ function addMessage(channel, from, text, opts = {}) {
     kind: opts.kind || 'text',
     text,
     mentions: opts.kind ? [] : parseMentions(text),
+    skills,
     replyTo: opts.replyTo || undefined,
     ts: Date.now(),
     fromKind: opts.fromKind || db.agents[from]?.kind || 'human',
@@ -452,6 +552,7 @@ async function route(req, res) {
           if (body.persona) existing.persona = body.persona;
           if (CONTEXTS.has(body.context)) existing.context = body.context;
           if (body.autoReply !== undefined) existing.autoReply = !!body.autoReply;
+          if (Array.isArray(body.skills)) existing.skills = body.skills.map((s) => String(s).slice(0, 40)).filter(Boolean).slice(0, 8);
           touchPresence(name);
           return json(res, 200, { token: existing.token, me: pubAgent(existing) });
         }
@@ -463,6 +564,9 @@ async function route(req, res) {
         token: newToken(), webhookUrl: body.webhookUrl || null,
         context,
         autoReply: kind === 'agent' ? !!body.autoReply : false, // 离线托管应答（网页手动添加常用）
+        skills: Array.isArray(body.skills)
+          ? body.skills.map((s) => String(s).slice(0, 40)).filter(Boolean).slice(0, 8) // 默认携带技能
+          : [],
         hue: hueOf(name), createdAt: Date.now(), lastSeen: Date.now(),
       };
       db.agents[name] = agent;
@@ -482,7 +586,9 @@ async function route(req, res) {
     }
 
     const me = auth(req, body);
-    if (!me && p !== '/api/agents') return json(res, 401, { error: '无效 token，请先注册 /api/register' });
+    // 公开只读：名册 + 共享技能库/知识库（团队资料，harness 内 curl 免 token 才好用）
+    const PUBLIC_GET = /^\/api\/(agents|skills(\/[^/]+)?|kb(\/[^/]+)?)$/;
+    if (!me && !PUBLIC_GET.test(p)) return json(res, 401, { error: '无效 token，请先注册 /api/register' });
     touchPresence(me?.name);
 
     /* ---- 全量状态（登录后第一拉） ---- */
@@ -596,6 +702,28 @@ async function route(req, res) {
       child.on('exit', () => spawnedBridges.delete(name));
       touchPresence(name);
       return json(res, 200, { ok: true, cmd, cwd: cwd || null });
+    }
+
+    /* ---- 共享技能库 / 知识库（公开只读，供 agent 与人随时检索）---- */
+    if (p === '/api/skills' && method === 'GET') {
+      return json(res, 200, { skills: listSkills().map(({ name, description, triggers }) => ({ name, description, triggers })) });
+    }
+    let mSkill = p.match(/^\/api\/skills\/([^/]+)$/);
+    if (mSkill && method === 'GET') {
+      const s = getSkill(decodeURIComponent(mSkill[1]));
+      if (!s) return json(res, 404, { error: '技能不存在' });
+      return json(res, 200, { skill: s });
+    }
+    if (p === '/api/kb' && method === 'GET') {
+      return json(res, 200, { entries: kbEntries().map((e) => ({ name: e.name })), results: kbSearch(u.searchParams.get('q') || '', 5) });
+    }
+    let mKb = p.match(/^\/api\/kb\/([^/]+)$/);
+    if (mKb && method === 'GET') {
+      const name = decodeURIComponent(mKb[1]);
+      const e = kbEntries().find((x) => x.name === name);
+      if (!e) return json(res, 404, { error: '条目不存在' });
+      try { return json(res, 200, { name, body: fs.readFileSync(e.file, 'utf8') }); }
+      catch (err) { return json(res, 500, { error: err.message }); }
     }
 
     if (p === '/api/agents' && method === 'GET') {
@@ -775,6 +903,7 @@ function pubAgent(a) {
     online: isOnline(a), hasWebhook: !!a.webhookUrl, createdAt: a.createdAt,
     context: a.context || (a.kind === 'human' ? 'channel' : 'mentions'),
     autoReply: a.kind === 'agent' ? !!a.autoReply : false,
+    skills: a.skills || [],
   };
 }
 

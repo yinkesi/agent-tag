@@ -15,6 +15,7 @@ const S = {
   es: null,
   bootSeq: 0,                 // 进入时刻的事件水位，之前的算历史，不计未读
   replyTo: null,              // 引用回复目标（微信引用语义）
+  skills: [],                 // 共享技能库缓存（#补全与高亮用）
 };
 
 const API = location.origin;
@@ -139,6 +140,7 @@ async function enter({ token, me }) {
   rail.onclick = logout;
 
   await refreshState();
+  loadSkills(); // 预载共享技能库（#补全与气泡高亮）
   connectStream();
   switchTab('chats');
   renderApiPanel();
@@ -578,13 +580,18 @@ async function recallMessage(m) {
 
 function fillBubbleText(bubble, text) {
   const names = [...S.agents.keys()].sort((a, b) => b.length - a.length).map(esc);
-  if (!names.length) { bubble.textContent = text; return; }
-  const re = new RegExp(`@(${names.join('|')})`, 'g');
+  const skillNames = S.skills.map((s) => s.name).filter(Boolean).sort((a, b) => b.length - a.length).map(esc);
+  // 一个正则同时高亮 @成员 与 #技能（长名优先，免得短名截胡）
+  const parts = [];
+  if (names.length) parts.push(`@(${names.join('|')})`);
+  if (skillNames.length) parts.push(`#(${skillNames.join('|')})`);
+  if (!parts.length) { bubble.textContent = text; return; }
+  const re = new RegExp(parts.join('|'), 'g');
   let lastIdx = 0, m2;
   while ((m2 = re.exec(text))) {
     if (m2.index > lastIdx) bubble.appendChild(document.createTextNode(text.slice(lastIdx, m2.index)));
     const chip = document.createElement('span');
-    chip.className = 'mention';
+    chip.className = 'mention' + (m2[0][0] === '#' ? ' skill-tag' : '');
     chip.textContent = m2[0];
     bubble.appendChild(chip);
     lastIdx = m2.index + m2[0].length;
@@ -706,17 +713,49 @@ inputBox.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
 });
 
-function mentionQuery() {
+function triggerQuery() {
   const pos = inputBox.selectionStart;
   const before = inputBox.value.slice(0, pos);
-  const m2 = before.match(/@([^\s@]*)$/);
-  return m2 ? { query: m2[1], start: pos - m2[0].length, caret: pos } : null;
+  const m2 = before.match(/([@#])([^\s@#]*)$/);
+  return m2 ? { sig: m2[1], query: m2[2], start: pos - m2[0].length, caret: pos } : null;
+}
+const mentionQuery = triggerQuery; // 兼容旧名
+
+async function loadSkills(force) {
+  if (S.skills.length && !force) return S.skills;
+  try {
+    const j = await api('/api/skills');
+    S.skills = j.skills || [];
+  } catch {}
+  return S.skills;
 }
 
-function updateMentionPop() {
+async function updateMentionPop() {
   const pop = $('#mentionPop');
-  const q = mentionQuery();
+  const q = triggerQuery();
   if (!q) { pop.classList.add('hidden'); return; }
+  if (q.sig === '#') {
+    // # → 共享技能库补全（消息携带技能）
+    const skills = await loadSkills();
+    const hit = skills
+      .filter((s) => s.name.toLowerCase().includes(q.query.toLowerCase()) || (s.triggers || []).some((t) => t.toLowerCase().includes(q.query.toLowerCase())))
+      .slice(0, 8);
+    if (!hit.length) { pop.classList.add('hidden'); return; }
+    pop.innerHTML = '';
+    hit.forEach((s, i) => {
+      const it = document.createElement('button');
+      it.type = 'button';
+      it.className = 'mention-item' + (i === 0 ? ' sel' : '');
+      const icon = avatarEl('⚡', 45, 'sm');
+      it.append(icon,
+        Object.assign(document.createElement('span'), { className: 'mi-name', textContent: '#' + s.name }),
+        Object.assign(document.createElement('span'), { className: 'mi-persona', textContent: s.description || '' }));
+      it.onclick = () => insertMention(s.name, q);
+      pop.appendChild(it);
+    });
+    pop.classList.remove('hidden');
+    return;
+  }
   const ch = S.channels.get(S.active);
   const members = ch ? ch.members.filter((n) => n !== S.me.name) : [];
   const hit = members
@@ -741,7 +780,7 @@ function updateMentionPop() {
 
 function insertMention(name, q) {
   const v = inputBox.value;
-  inputBox.value = v.slice(0, q.start) + '@' + name + ' ' + v.slice(q.caret);
+  inputBox.value = v.slice(0, q.start) + q.sig + name + ' ' + v.slice(q.caret);
   const pos = q.start + name.length + 2;
   inputBox.setSelectionRange(pos, pos);
   inputBox.focus();
