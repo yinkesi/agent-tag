@@ -42,29 +42,21 @@ body {
 
 ::selection { background: rgba(10, 132, 255, 0.35); }
 
-/* ---------- 背景极光（科技感氛围层） ---------- */
+/* ---------- 背景极光（静态柔光层：radial-gradient 自带柔边，零滤镜开销。
+   勿改回 blur 动画——它会垫在玻璃面板下迫使 backdrop-filter 每帧重采样，整页卡顿） ---------- */
 
-.aurora { position: fixed; inset: 0; overflow: hidden; z-index: 0; filter: saturate(140%); }
-.aurora-blob {
-  position: absolute;
-  border-radius: 50%;
-  filter: blur(90px);
-  opacity: 0.5;
-  will-change: transform;
-}
-.b1 { width: 55vw; height: 55vw; left: -12vw; top: -18vw; background: radial-gradient(circle, #0a3d91 0%, transparent 65%); animation: drift1 26s ease-in-out infinite alternate; }
-.b2 { width: 46vw; height: 46vw; right: -10vw; top: 22vh; background: radial-gradient(circle, #3a2a9d 0%, transparent 65%); animation: drift2 32s ease-in-out infinite alternate; }
-.b3 { width: 38vw; height: 38vw; left: 28vw; bottom: -20vw; background: radial-gradient(circle, #075757 0%, transparent 65%); animation: drift3 38s ease-in-out infinite alternate; }
-@keyframes drift1 { to { transform: translate(9vw, 7vh) scale(1.12); } }
-@keyframes drift2 { to { transform: translate(-7vw, -6vh) scale(0.92); } }
-@keyframes drift3 { to { transform: translate(5vw, -8vh) scale(1.08); } }
+.aurora { position: fixed; inset: 0; overflow: hidden; z-index: 0; }
+.aurora-blob { position: absolute; border-radius: 50%; }
+.b1 { width: 60vw; height: 60vw; left: -14vw; top: -20vw; background: radial-gradient(circle, rgba(10, 61, 145, 0.5) 0%, rgba(10, 61, 145, 0.16) 42%, transparent 70%); }
+.b2 { width: 52vw; height: 52vw; right: -12vw; top: 18vh; background: radial-gradient(circle, rgba(58, 42, 157, 0.45) 0%, rgba(58, 42, 157, 0.14) 42%, transparent 70%); }
+.b3 { width: 44vw; height: 44vw; left: 26vw; bottom: -22vw; background: radial-gradient(circle, rgba(7, 87, 87, 0.42) 0%, rgba(7, 87, 87, 0.13) 42%, transparent 70%); }
 
 /* ---------- 玻璃材质 ---------- */
 
 .glass {
   background: var(--glass-mid);
-  backdrop-filter: blur(30px) saturate(170%);
-  -webkit-backdrop-filter: blur(30px) saturate(170%);
+  backdrop-filter: blur(20px) saturate(160%);
+  -webkit-backdrop-filter: blur(20px) saturate(160%);
   border: 1px solid var(--hair);
   border-top-color: var(--hair-bright); /* 亮顶边 = 材质受光 */
   box-shadow: var(--shadow-panel);
@@ -405,6 +397,8 @@ button, .field, textarea { transition: transform 100ms ease-out, background 160m
   display: flex; gap: 10px; margin-top: 10px;
   max-width: 78%;
   animation: msg-in 340ms var(--spring);
+  content-visibility: auto;          /* 屏外消息跳过布局与绘制，长历史滚动不卡 */
+  contain-intrinsic-size: auto 64px;
 }
 @keyframes msg-in { from { opacity: 0; transform: translateY(8px); } }
 .msg.mine { align-self: flex-end; flex-direction: row-reverse; }
@@ -642,7 +636,6 @@ button, .field, textarea { transition: transform 100ms ease-out, background 160m
 /* 无障碍降级 */
 @media (prefers-reduced-motion: reduce) {
   * { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; scroll-behavior: auto !important; }
-  .aurora-blob { animation: none !important; }
 }
 @media (prefers-reduced-transparency: reduce) {
   .glass, .rail, .listpane, .chatpane { background: #15171e; backdrop-filter: none; }
