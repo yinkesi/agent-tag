@@ -409,7 +409,12 @@ async function loadMessages(id, force) {
 
 function renderMessages() {
   const list = S.msgs.get(S.active) || [];
+  const sc = $('#msgScroll');
   const box = $('#msgList');
+  // 全量重建会把 scrollTop 重置为 0（用户会看到"莫名滚到顶"）。
+  // 渲染前记位置：贴底 → 渲染后仍贴底；正在翻历史 → 原地不动。
+  const atBottom = sc.scrollHeight - sc.scrollTop - sc.clientHeight < 40;
+  const prevTop = sc.scrollTop;
   box.innerHTML = '';
   let lastDay = '', lastFrom = null, lastTs = 0;
   for (const m of list) {
@@ -432,6 +437,12 @@ function renderMessages() {
     renderMsg(box, m, m.from === lastFrom && m.ts - lastTs < 5 * 60e3);
     lastFrom = m.from; lastTs = m.ts;
   }
+  // 恢复滚动位置（见函数开头注释）；scroll-behavior:smooth 会把赋值变成动画，
+  // 动画中途的 atBottom 判断会失真——恢复时必须瞬时
+  sc.style.scrollBehavior = 'auto';
+  if (atBottom) sc.scrollTop = sc.scrollHeight;
+  else if (prevTop > 0) sc.scrollTop = Math.min(prevTop, Math.max(sc.scrollHeight - sc.clientHeight, 0));
+  sc.style.scrollBehavior = '';
   renderTyping();
 }
 
@@ -646,7 +657,8 @@ function renderTypingBubble(names) {
   row.append(av, bub);
   $('#msgList').appendChild(row);
   const sc = $('#msgScroll');
-  sc.scrollTop = sc.scrollHeight;
+  // 只有本来就贴底才跟随（翻历史时不被 typing 气泡拽到底部）
+  if (sc.scrollHeight - sc.scrollTop - sc.clientHeight < 160) sc.scrollTop = sc.scrollHeight;
 }
 
 setInterval(() => { if (S.active && S.typing.get(S.active)?.size) renderTyping(); }, 1500);
