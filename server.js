@@ -131,6 +131,7 @@ function seed() {
 
 const sseClients = new Set(); // { res, name }
 const eventWaiters = new Set(); // 长轮询等待者，事件到达即刻唤醒（不做周期轮询）
+const spawnedBridges = new Map(); // name -> child，服务端拉起的 LLM 桥进程（模块级，跨请求存活）
 
 // 持久化：异步合并写（突发消息只落一次盘），启动时建好目录
 function scheduleSave() {
@@ -496,19 +497,18 @@ async function route(req, res) {
 
     /* ---- 名册（公开） ---- */
     /* ---- 一键接上本地模型（spawn bridge-agent 子进程，网页「添加 agent」用）---- */
-    const spawned = new Map(); // name -> child（内存态；server 重启后桥进程自然脱离管理）
     if (p === '/api/agents/spawn-bridge' && method === 'POST') {
       const name = String(body.name || '').normalize('NFC');
       const target = db.agents[name];
       if (!target || target.kind !== 'agent') return json(res, 404, { error: '先注册该 agent 再接模型' });
       if (body.stop) {
-        const child = spawned.get(name);
+        const child = spawnedBridges.get(name);
         if (!child) return json(res, 404, { error: '没有由本服务拉起的桥进程' });
         try { child.kill(); } catch {}
-        spawned.delete(name);
+        spawnedBridges.delete(name);
         return json(res, 200, { ok: true, stopped: true });
       }
-      if (spawned.has(name)) return json(res, 200, { ok: true, already: true });
+      if (spawnedBridges.has(name)) return json(res, 200, { ok: true, already: true });
       const baseUrl = String(body.baseUrl || 'http://127.0.0.1:8080/v1').replace(/\/$/, '');
       const model = String(body.model || 'MiniCPM5-2B');
       // 先探活 LLM 服务，避免起了桥却每次调用都失败
@@ -527,10 +527,44 @@ async function route(req, res) {
         '--hello', '0',
       ], { detached: true, stdio: 'ignore', cwd: ROOT });
       child.unref();
-      spawned.set(name, child);
-      child.on('exit', () => spawned.delete(name));
+      spawnedBridges.set(name, child);
+      child.on('exit', () => spawnedBridges.delete(name));
       touchPresence(name); // 桥进程已启动，很快会有轮询；先亮灯
       return json(res, 200, { ok: true, baseUrl, model });
+    }
+
+    /* ---- 改名（级联：名册/群成员/历史消息发言者与 mentions/桥进程表，广播 rename）---- */
+    if (p === '/api/agents/rename' && method === 'POST') {
+      const from = String(body.from || '').normalize('NFC');
+      const to = String(body.to || '').trim().normalize('NFC');
+      const a = db.agents[from];
+      if (!a) return json(res, 404, { error: `找不到「${from}」` });
+      if (from === 'TagBot') return json(res, 400, { error: '内置机器人 TagBot 不能改名' });
+      if (me.kind !== 'human' && me.name !== from) return json(res, 403, { error: '只能改自己的名字' });
+      if (!to || to.length > 24) return json(res, 400, { error: '新名字不能为空且不超过 24 字符' });
+      if (/[\s@]/.test(to)) return json(res, 400, { error: '新名字里不能有空格或 @' });
+      if (db.agents[to]) return json(res, 409, { error: `「${to}」已被占用` });
+
+      delete db.agents[from];
+      a.name = to;
+      a.hue = hueOf(to); // 色相跟新名字走（此前的消息保留原色，属历史）
+      db.agents[to] = a;
+      for (const ch of Object.values(db.channels)) {
+        const i = ch.members.indexOf(from);
+        if (i !== -1) ch.members[i] = to;
+      }
+      for (const m of db.messages) {
+        if (m.from === from) m.from = to; // 历史消息跟随新名字（微信语义）
+        if (m.mentions) m.mentions = m.mentions.map((n) => (n === from ? to : n));
+      }
+      const sp = spawnedBridges.get(from);
+      if (sp) { spawnedBridges.delete(from); spawnedBridges.set(to, sp); }
+      for (const ch of Object.values(db.channels)) {
+        if (ch.type === 'group' && ch.isPublic) sysMsg(ch.id, `「${from}」已改名为「${to}」`);
+      }
+      pushEvent({ type: 'rename', from, to });
+      save();
+      return json(res, 200, { ok: true, agent: pubAgent(a) });
     }
 
     if (p === '/api/agents' && method === 'GET') {

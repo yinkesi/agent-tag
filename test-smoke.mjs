@@ -156,6 +156,42 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const guard = mRead.json.messages.find((m) => m.from === `手办${rand}`);
   ok(!!guard && guard.text.includes('离线托管应答') && guard.text.includes('帮我订个会议室'), '离线托管应答生效（含任务回显）');
 
+  /* 18. 改名（级联 + 权限 + TagBot 禁改） */
+  const renAgent = await api('POST', '/api/register', { name: `旧名${rand}`, kind: 'agent' });
+  const rt = renAgent.json.token;
+  const oldName = `旧名${rand}`, newName = `新名${rand}`;
+  await api('POST', '/api/messages', { channel: 'general', text: `@${oldName} 存一条会被改名的消息` }, ht);
+  // TagBot 禁改
+  const tb = await api('POST', '/api/agents/rename', { from: 'TagBot', to: 'TagBot2' }, ht);
+  ok(tb.status === 400, 'TagBot 禁止改名');
+  // agent 不能改别人
+  const other2 = await api('POST', '/api/register', { name: `旁人${rand}`, kind: 'agent' });
+  const noPerm = await api('POST', '/api/agents/rename', { from: oldName, to: newName }, other2.json.token);
+  ok(noPerm.status === 403, 'agent 不能改别人的名字');
+  // 重名拒绝
+  const dup2 = await api('POST', '/api/agents/rename', { from: oldName, to: 'gbc' }, ht);
+  ok(dup2.status === 409, '改成已占用名字返回 409');
+  // 人类改 agent：级联生效
+  const rn = await api('POST', '/api/agents/rename', { from: oldName, to: newName }, ht);
+  ok(rn.status === 200, '人类改名 agent 成功');
+  const st2 = await api('GET', '/api/state', null, ht);
+  ok(st2.json.agents.some((a) => a.name === newName) && !st2.json.agents.some((a) => a.name === oldName), '名册已切换到新名字');
+  const gen = st2.json.channels.find((c) => c.id === 'general');
+  ok(gen.members.includes(newName) && !gen.members.includes(oldName), '群成员表跟随新名字');
+  const hist = await api('GET', `/api/messages?channel=general&limit=50`, null, ht);
+  const m1 = hist.json.messages.find((m) => m.text === `@${oldName} 存一条会被改名的消息`);
+  ok(m1 && m1.from === human.json.me.name && m1.mentions.includes(newName), '历史消息 mentions 已重写为新名字');
+  // @新名字能派活；旧名字能被重新注册
+  const s2 = await api('POST', '/api/messages', { channel: 'general', text: `@${newName} 你好` }, ht);
+  ok(s2.json.message.mentions.includes(newName), '@ 解析识别新名字');
+  const reclaim = await api('POST', '/api/register', { name: oldName, kind: 'agent' });
+  ok(reclaim.status === 200, '旧名字改名后可被重新注册');
+  // rename 事件广播
+  const rnSeq = (await api('GET', '/api/health')).json.seq;
+  await api('POST', '/api/agents/rename', { from: `旁人${rand}`, to: `旁改${rand}` }, ht);
+  const ev2 = await api('GET', `/api/events?token=${encodeURIComponent(ht)}&since=${rnSeq}&wait=0`);
+  ok(ev2.json.events.some((e) => e.type === 'rename'), 'rename 事件已广播');
+
   console.log(`\n结果：${pass} 通过，${fail} 失败`);
   process.exit(fail ? 1 : 0);
 })().catch((e) => { console.error('测试脚本异常:', e); process.exit(1); });

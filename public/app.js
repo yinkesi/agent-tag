@@ -181,6 +181,24 @@ function connectStream() {
   };
 }
 
+function applyRename(from, to) {
+  // 本地缓存跟着换：自己身份、消息缓存（发言者/mentions）、会话预览
+  if (S.me.name === from) S.me.name = to;
+  for (const [, list] of S.msgs) {
+    for (const m of list) {
+      if (m.from === from) m.from = to;
+      if (m.mentions) m.mentions = m.mentions.map((n) => (n === from ? to : n));
+    }
+  }
+  for (const [, p] of previews) if (p.from === from) p.from = to;
+  refreshState().then(() => {
+    renderConvList();
+    renderContactList();
+    if (S.active) renderMessages();
+    updateTitleBadge();
+  });
+}
+
 function handleEvent(evt) {
   if (evt.type === 'message') {
     const m = evt.message;
@@ -218,6 +236,8 @@ function handleEvent(evt) {
         renderConvList();
       }
     }
+  } else if (evt.type === 'rename') {
+    applyRename(evt.from, evt.to);
   } else if (evt.type === 'presence') {
     const a = S.agents.get(evt.name);
     if (a) { a.online = evt.online; renderContactList(); renderConvList(); }
@@ -852,11 +872,57 @@ function renderContactList() {
         } catch (err) { toast(err.message); }
       };
       actions.appendChild(dm);
+      // 改名（agent 专属；TagBot 为内置机器人服务端禁改，前端不显示）
+      if (a.kind === 'agent') {
+        const rn = document.createElement('button');
+        rn.className = 'btn-ghost';
+        rn.textContent = '改名';
+        rn.onclick = (e) => { e.stopPropagation(); openRenameModal(a.name); };
+        actions.appendChild(rn);
+      }
       row.append(av, body, actions);
       box.appendChild(row);
     }
   }
   if (!any) box.innerHTML = `<div class="empty-hint"><div class="big">🤖</div>还没有其他成员<br>去「接入」页看看怎么把 agent 拉进来</div>`;
+}
+
+/* ---------- 改名弹窗（通讯录）---------- */
+
+function openRenameModal(from) {
+  const box = $('#modalBox');
+  box.innerHTML = '';
+  const h = document.createElement('h3');
+  h.textContent = `给「${from}」改名`;
+  const input = Object.assign(document.createElement('input'), {
+    className: 'field', value: from, maxLength: 24, placeholder: '新名字（唯一，不含 @ 或空格）',
+  });
+  const note = Object.assign(document.createElement('p'), {
+    textContent: '改名后：群成员、历史消息的发言者与 @ 记录、在线桥进程全部自动跟随；token 不变，已接入的程序无需改配置。',
+    style: 'font-size:12px;color:var(--text-3)',
+  });
+  const row = document.createElement('div');
+  row.className = 'row';
+  const cancel = document.createElement('button');
+  cancel.className = 'btn-ghost'; cancel.textContent = '取消';
+  cancel.onclick = closeModal;
+  const ok = document.createElement('button');
+  ok.className = 'btn-primary'; ok.style.cssText = 'width:auto;padding:8px 22px';
+  ok.textContent = '改名';
+  ok.onclick = async () => {
+    const to = input.value.trim();
+    if (!to || to === from) return input.focus();
+    try {
+      await api('/api/agents/rename', { method: 'POST', body: JSON.stringify({ from, to }) });
+      closeModal();
+      toast(`已改为「${to}」`);
+    } catch (e) { toast(e.message); }
+  };
+  row.append(cancel, ok);
+  box.append(h, input, note, row);
+  $('#modalScrim').classList.remove('hidden');
+  input.focus();
+  input.select();
 }
 
 /* ---------- 接入面板 ---------- */
