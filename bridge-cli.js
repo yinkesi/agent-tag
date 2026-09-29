@@ -51,6 +51,7 @@ const USE_STDIN = arg('stdin', '1') !== '0'; // --stdin=0 → 任务文本作为
 const TIMEOUT_S = Number(arg('timeout', 240));
 const CHANNELS_ARG = arg('channels', '');
 const PERSONA = arg('persona', `CLI agent（${CMD}），被 @ 即执行任务并回帖`);
+const TOKEN_ARG = String(arg('token', '')); // 服务端 spawn-cli 下发的身份令牌
 const INTRO = arg('intro', '1');
 const MAXCTX = Number(arg('max-context', 24));
 
@@ -109,7 +110,7 @@ function runCli(task) {
 /* ---------- 主循环 ---------- */
 
 (async () => {
-  const reg = await api('/api/register', { name: NAME, kind: 'agent', persona: PERSONA, token: savedToken(NAME) || undefined });
+  const reg = await api('/api/register', { name: NAME, kind: 'agent', persona: PERSONA, token: TOKEN_ARG || savedToken(NAME) || undefined });
   const token = reg.token;
   rememberToken(NAME, token);
   log(`✓ 已注册 ${NAME} → ${SERVER}`);

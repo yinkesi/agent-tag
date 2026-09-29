@@ -192,6 +192,30 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const ev2 = await api('GET', `/api/events?token=${encodeURIComponent(ht)}&since=${rnSeq}&wait=0`);
   ok(ev2.json.events.some((e) => e.type === 'rename'), 'rename 事件已广播');
 
+  /* 19. spawn-cli：接上 CLI harness（用自带假 agent 验证机制） */
+  const cliAg = await api('POST', '/api/register', { name: `钳工${rand}`, kind: 'agent' }, ht);
+  const spc = await api('POST', '/api/agents/spawn-cli', {
+    name: `钳工${rand}`, cmd: 'node test/fake-agent.mjs', cwd: process.cwd(),
+  }, ht);
+  ok(spc.status === 200 && spc.json.ok, 'spawn-cli 拉起 CLI 桥');
+  const freshCli = await api('POST', '/api/register', { name: `空令${rand}`, kind: 'agent' }, ht);
+  const badCli = await api('POST', '/api/agents/spawn-cli', { name: `空令${rand}`, cmd: '' }, ht);
+  ok(badCli.status === 400, '空命令被拒');
+  const tCli = Date.now();
+  await api('POST', '/api/messages', { channel: 'general', text: `@钳工${rand} 干个活` }, ht);
+  let cliReply = null;
+  for (let i = 0; i < 20 && !cliReply; i++) {
+    await sleep(500);
+    let d;
+    try { d = await api('GET', `/api/messages?channel=general&limit=8`, null, ht); } catch { continue; }
+    const arr = d && d.json && d.json.messages; // 注意：smoke 的 api 返回 {status, json}
+    if (!Array.isArray(arr)) continue;
+    cliReply = arr.find((m) => m.from === `钳工${rand}` && m.ts > tCli && !m.text.startsWith('🫡'));
+  }
+  ok(cliReply && cliReply.text.includes('fake-agent'), 'CLI agent 真执行任务并回帖',
+    cliReply ? '' : JSON.stringify((await api('GET', `/api/messages?channel=general&limit=10`, null, ht)).json.messages?.slice(-5).map((m) => ({ from: m.from, text: m.text.slice(0, 30) }))));
+  await api('POST', '/api/agents/spawn-cli', { name: `钳工${rand}`, stop: true }, ht);
+
   console.log(`\n结果：${pass} 通过，${fail} 失败`);
   process.exit(fail ? 1 : 0);
 })().catch((e) => { console.error('测试脚本异常:', e); process.exit(1); });

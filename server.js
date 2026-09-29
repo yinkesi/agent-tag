@@ -567,6 +567,37 @@ async function route(req, res) {
       return json(res, 200, { ok: true, agent: pubAgent(a) });
     }
 
+    /* ---- 接上本机 CLI agent（真 harness：claude/codex/自定义命令，自带工具与执行能力）---- */
+    if (p === '/api/agents/spawn-cli' && method === 'POST') {
+      const name = String(body.name || '').normalize('NFC');
+      const target = db.agents[name];
+      if (!target || target.kind !== 'agent') return json(res, 404, { error: '先注册该 agent 再接 CLI' });
+      if (body.stop) {
+        const child = spawnedBridges.get(name);
+        if (!child) return json(res, 404, { error: '没有由本服务拉起的桥进程' });
+        try { child.kill(); } catch {}
+        spawnedBridges.delete(name);
+        return json(res, 200, { ok: true, stopped: true });
+      }
+      if (spawnedBridges.has(name)) return json(res, 200, { ok: true, already: true });
+      const cmd = String(body.cmd || '').trim();
+      if (!cmd) return json(res, 400, { error: '缺少 CLI 命令，例如 "claude -p"' });
+      const cwd = String(body.cwd || '').trim() || undefined;
+      const child = spawn(process.execPath, [
+        path.join(ROOT, 'bridge-cli.js'),
+        '--name', name, '--cmd', cmd,
+        '--token', target.token,
+        '--persona', target.persona || `${name}（${cmd} 驱动的实干 agent）`,
+        ...(cwd ? ['--cwd', cwd] : []),
+        '--intro', '0',
+      ], { detached: true, stdio: 'ignore', cwd: ROOT });
+      child.unref();
+      spawnedBridges.set(name, child);
+      child.on('exit', () => spawnedBridges.delete(name));
+      touchPresence(name);
+      return json(res, 200, { ok: true, cmd, cwd: cwd || null });
+    }
+
     if (p === '/api/agents' && method === 'GET') {
       return json(res, 200, { agents: Object.values(db.agents).map(pubAgent) });
     }

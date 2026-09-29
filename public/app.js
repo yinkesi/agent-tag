@@ -1105,31 +1105,76 @@ function openAddAgentModal() {
     style: 'font-size:12px;color:var(--text-3);margin:-6px 0 0',
   });
 
-  // 离线托管应答开关
-  const arLabel = document.createElement('label');
-  arLabel.className = 'member-pick';
-  arLabel.style.padding = '2px 6px';
-  const arCb = document.createElement('input');
-  arCb.type = 'checkbox';
-  arCb.checked = true;
-  const arText = Object.assign(document.createElement('span'), {
-    textContent: '离线托管应答：被 @ 而不在线时，平台代为回帖；真实程序持 token 接入后自动接管',
-    style: 'font-size:12.5px;color:var(--text-2)',
+  // 接入方式三选一：CLI agent（真 harness，推荐）/ 本地模型（纯聊天）/ 仅占位（托管）
+  let mode = 'cli';
+  const modeSeg = document.createElement('div');
+  modeSeg.className = 'seg';
+  const modes = [['cli', 'CLI agent（推荐）'], ['llm', '本地模型聊天'], ['none', '仅占位']];
+  modes.forEach(([v, label], i) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'seg-btn' + (i === 0 ? ' active' : '');
+    b.textContent = label;
+    b.title = {
+      cli: '接上本机 CLI agent（Claude Code / Codex / 自定义命令）：自带工具，能真读文件、跑命令、写代码',
+      llm: '接本地 MiniCPM5 纯聊天：没有工具，不能动文件（需先跑 demo.bat）',
+      none: '不接程序：离线时由平台托管代答，占个席位',
+    }[v];
+    b.onclick = () => {
+      modeSeg.querySelectorAll('.seg-btn').forEach((x) => x.classList.remove('active'));
+      b.classList.add('active');
+      mode = v;
+      cliBox.classList.toggle('hidden', v !== 'cli');
+      llmHint.classList.toggle('hidden', v !== 'llm');
+      arHint.classList.toggle('hidden', v !== 'none');
+    };
+    modeSeg.appendChild(b);
   });
-  arLabel.append(arCb, arText);
 
-  // 一键接上本地模型（真·立即响应：服务端拉起 bridge-agent 子进程）
-  const llmLabel = document.createElement('label');
-  llmLabel.className = 'member-pick';
-  llmLabel.style.padding = '2px 6px';
-  const llmCb = document.createElement('input');
-  llmCb.type = 'checkbox';
-  llmCb.checked = false;
-  const llmText = Object.assign(document.createElement('span'), {
-    textContent: '立即接上本地模型（MiniCPM5）：@ 它由真模型回帖，需先跑 demo.bat 起模型',
-    style: 'font-size:12.5px;color:var(--text-2)',
+  // CLI 参数区（mode=cli 时显示）
+  const cliBox = document.createElement('div');
+  cliBox.style.cssText = 'display:flex;flex-direction:column;gap:8px';
+  const PRESETS = [
+    ['Claude Code', 'claude -p'],
+    ['Codex', 'codex exec --skip-git-repo-check'],
+    ['自定义…', ''],
+  ];
+  let cliCmd = PRESETS[0][1];
+  const presetRow = document.createElement('div');
+  presetRow.className = 'seg';
+  PRESETS.forEach(([label, cmd], i) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'seg-btn' + (i === 0 ? ' active' : '');
+    b.textContent = label;
+    b.onclick = () => {
+      presetRow.querySelectorAll('.seg-btn').forEach((x) => x.classList.remove('active'));
+      b.classList.add('active');
+      if (cmd) { cliCmd = cmd; cmdInput.value = cmd; cmdInput.disabled = true; }
+      else { cmdInput.disabled = false; cmdInput.focus(); }
+    };
+    presetRow.appendChild(b);
   });
-  llmLabel.append(llmCb, llmText);
+  const cmdInput = Object.assign(document.createElement('input'), {
+    className: 'field', value: PRESETS[0][1], disabled: true,
+    placeholder: 'headless 命令（任务经 stdin 传入，stdout 回帖）',
+  });
+  cmdInput.oninput = () => { cliCmd = cmdInput.value.trim(); };
+  const cwdInput = Object.assign(document.createElement('input'), {
+    className: 'field', value: 'D:\\code', placeholder: '工作目录（它在哪里干活，选填）',
+  });
+  cliBox.append(presetRow, cmdInput, cwdInput);
+
+  const llmHint = Object.assign(document.createElement('p'), {
+    textContent: '纯聊天模型：只能对话，没有工具、动不了文件（平台哲学：活由 agent 自己的能力干）。需先跑 demo.bat 起本地模型。',
+    style: 'font-size:12px;color:var(--text-3);margin:0',
+  });
+  llmHint.classList.add('hidden');
+  const arHint = Object.assign(document.createElement('p'), {
+    textContent: '不接程序：被 @ 而离线时平台代答回执；之后真实程序持 token 接入自动接管。',
+    style: 'font-size:12px;color:var(--text-3);margin:0',
+  });
+  arHint.classList.add('hidden');
 
   const row = document.createElement('div');
   row.className = 'row';
@@ -1143,33 +1188,37 @@ function openAddAgentModal() {
   ok.textContent = '添加';
   ok.onclick = async () => {
     if (!name.value.trim()) return name.focus();
+    if (mode === 'cli' && !cliCmd) { toast('请选择或填写 CLI 命令'); return; }
     try {
       const { token, me } = await api('/api/register', {
         method: 'POST',
         body: JSON.stringify({
           name: name.value.trim(), kind: 'agent',
           persona: persona.value.trim(), context: ctxVal,
-          autoReply: arCb.checked,
+          autoReply: mode === 'none',
         }),
       });
       await refreshState();
       renderContactList();
-      // 可选：立即接上本地模型（spawn bridge 子进程）
-      let llmNote = '';
-      if (llmCb.checked) {
+      // 按接入方式立即挂载
+      let hookNote = '';
+      if (mode === 'cli') {
+        try {
+          const r = await api('/api/agents/spawn-cli', { method: 'POST', body: JSON.stringify({ name: me.name, cmd: cliCmd, cwd: cwdInput.value.trim() }) });
+          hookNote = `已接上 CLI agent（${r.cmd}${r.cwd ? ' @ ' + r.cwd : ''}）——它有自己的工具，能真干活，@ 它即派活。`;
+        } catch (e) { hookNote = `CLI 未接上：${e.message}`; }
+      } else if (mode === 'llm') {
         try {
           const r = await api('/api/agents/spawn-bridge', { method: 'POST', body: JSON.stringify({ name: me.name }) });
-          llmNote = `已接上本地模型（${r.model}），@${me.name} 即由真模型回帖。`;
-        } catch (e) { llmNote = `本地模型未接上：${e.message}`; }
+          hookNote = `已接上本地模型（${r.model}，纯聊天无工具）。`;
+        } catch (e) { hookNote = `本地模型未接上：${e.message}`; }
       }
       // 成功态：展示 token（真实程序接入凭据）
       box.innerHTML = '';
       const done = document.createElement('h3');
       done.textContent = `已添加「${me.name}」`;
       const note = Object.assign(document.createElement('p'), {
-        textContent: (llmNote ? llmNote + ' ' : '') + (arCb.checked && !llmCb.checked
-          ? '离线时会由平台托管应答；真实程序持下面的 token 接入后自动接管。'
-          : '真实程序可持下面的 token 接入。'),
+        textContent: (hookNote ? hookNote + ' ' : '') + '真实程序也可持下面的 token 自行接入。',
         style: 'font-size:12.5px;color:var(--text-2)',
       });
       const tk = document.createElement('div');
@@ -1189,7 +1238,7 @@ function openAddAgentModal() {
     } catch (e) { toast(e.message); }
   };
   row.append(cancel, ok);
-  box.append(h, name, persona, seg, segHint, arLabel, llmLabel, row);
+  box.append(h, name, persona, modeSeg, cliBox, llmHint, arHint, seg, segHint, row);
   $('#modalScrim').classList.remove('hidden');
   name.focus();
 }
