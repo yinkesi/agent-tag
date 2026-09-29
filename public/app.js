@@ -825,6 +825,13 @@ function renderContactList() {
         ctx.textContent = ctxLabel;
         ctx.title = { mentions: '上下文隔离：只看得到 @ 自己的消息', channel: '可读全群历史', none: '无任何群聊历史' }[a.context || 'mentions'];
         nm.appendChild(ctx);
+        if (a.autoReply) {
+          const ar = document.createElement('span');
+          ar.className = 'kind-chip ar';
+          ar.textContent = '托管';
+          ar.title = '离线托管应答：被 @ 而不在线时由平台代为回帖';
+          nm.appendChild(ar);
+        }
       }
       const pe = document.createElement('div');
       pe.className = 'contact-persona';
@@ -913,7 +920,9 @@ function switchTab(tab) {
   $('#chatList').classList.toggle('hidden', tab !== 'chats');
   $('#contactList').classList.toggle('hidden', tab !== 'contacts');
   $('#apiPanel').classList.toggle('hidden', tab !== 'api');
-  $('#newChatBtn').classList.toggle('hidden', tab !== 'chats');
+  // FAB：消息页=发起群聊；通讯录页=手动添加 agent
+  $('#newChatBtn').classList.toggle('hidden', tab === 'api');
+  $('#newChatBtn').title = tab === 'contacts' ? '手动添加 agent' : '发起群聊';
   $('#listTitle').textContent = { chats: '消息', contacts: '通讯录', api: '接入' }[tab];
   if (tab === 'contacts') renderContactList();
   if (tab === 'api') renderApiPanel();
@@ -926,6 +935,7 @@ $('#searchInput').addEventListener('input', () => {
 });
 
 $('#newChatBtn').onclick = () => {
+  if (S.tab === 'contacts') return openAddAgentModal();
   const box = $('#modalBox');
   box.innerHTML = '';
   const h = document.createElement('h3'); h.textContent = '发起群聊';
@@ -986,6 +996,104 @@ $('#newChatBtn').onclick = () => {
 
 function closeModal() { $('#modalScrim').classList.add('hidden'); }
 $('#modalScrim').addEventListener('click', (e) => { if (e.target === e.currentTarget) closeModal(); });
+
+/* ---------- 手动添加 agent（通讯录页 FAB）---------- */
+
+function openAddAgentModal() {
+  const box = $('#modalBox');
+  box.innerHTML = '';
+  const h = document.createElement('h3');
+  h.textContent = '添加 agent';
+
+  const name = Object.assign(document.createElement('input'), { className: 'field', placeholder: '名字（唯一，不能含 @ 或空格）', maxLength: 24 });
+  const persona = Object.assign(document.createElement('input'), { className: 'field', placeholder: '人设（一句话，选填）', maxLength: 200 });
+
+  // 上下文可见性三档
+  const seg = document.createElement('div');
+  seg.className = 'seg';
+  const ctxs = [['mentions', '仅@（推荐）'], ['channel', '全群'], ['none', '无历史']];
+  let ctxVal = 'mentions';
+  ctxs.forEach(([v, label], i) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'seg-btn' + (i === 0 ? ' active' : '');
+    b.textContent = label;
+    b.title = { mentions: '只看得到 @ 自己的消息', channel: '可读全群历史', none: '无任何群聊历史' }[v];
+    b.onclick = () => { seg.querySelectorAll('.seg-btn').forEach((x) => x.classList.remove('active')); b.classList.add('active'); ctxVal = v; };
+    seg.appendChild(b);
+  });
+  const segHint = Object.assign(document.createElement('p'), {
+    textContent: '上下文可见性：这个 agent 能看到多少群聊',
+    style: 'font-size:12px;color:var(--text-3);margin:-6px 0 0',
+  });
+
+  // 离线托管应答开关
+  const arLabel = document.createElement('label');
+  arLabel.className = 'member-pick';
+  arLabel.style.padding = '2px 6px';
+  const arCb = document.createElement('input');
+  arCb.type = 'checkbox';
+  arCb.checked = true;
+  const arText = Object.assign(document.createElement('span'), {
+    textContent: '离线托管应答：被 @ 而不在线时，平台代为回帖；真实程序持 token 接入后自动接管',
+    style: 'font-size:12.5px;color:var(--text-2)',
+  });
+  arLabel.append(arCb, arText);
+
+  const row = document.createElement('div');
+  row.className = 'row';
+  const cancel = document.createElement('button');
+  cancel.className = 'btn-ghost';
+  cancel.textContent = '取消';
+  cancel.onclick = closeModal;
+  const ok = document.createElement('button');
+  ok.className = 'btn-primary';
+  ok.style.cssText = 'width:auto;padding:8px 22px';
+  ok.textContent = '添加';
+  ok.onclick = async () => {
+    if (!name.value.trim()) return name.focus();
+    try {
+      const { token, me } = await api('/api/register', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: name.value.trim(), kind: 'agent',
+          persona: persona.value.trim(), context: ctxVal,
+          autoReply: arCb.checked,
+        }),
+      });
+      await refreshState();
+      renderContactList();
+      // 成功态：展示 token（真实程序接入凭据）
+      box.innerHTML = '';
+      const done = document.createElement('h3');
+      done.textContent = `已添加「${me.name}」`;
+      const note = Object.assign(document.createElement('p'), {
+        textContent: arCb.checked
+          ? '离线时会由平台托管应答；真实程序持下面的 token 接入后自动接管。'
+          : '它不会自动回帖，等真实程序持下面的 token 接入。',
+        style: 'font-size:12.5px;color:var(--text-2)',
+      });
+      const tk = document.createElement('div');
+      tk.className = 'api-code';
+      tk.textContent = token;
+      tk.title = '点击复制';
+      tk.onclick = () => { navigator.clipboard.writeText(token); toast('token 已复制'); };
+      const closeRow = document.createElement('div');
+      closeRow.className = 'row';
+      const closeBtn = document.createElement('button');
+      closeBtn.className = 'btn-primary';
+      closeBtn.style.cssText = 'width:auto;padding:8px 22px';
+      closeBtn.textContent = '完成';
+      closeBtn.onclick = closeModal;
+      closeRow.appendChild(closeBtn);
+      box.append(done, note, tk, closeRow);
+    } catch (e) { toast(e.message); }
+  };
+  row.append(cancel, ok);
+  box.append(h, name, persona, seg, segHint, arLabel, row);
+  $('#modalScrim').classList.remove('hidden');
+  name.focus();
+}
 
 $('#membersBtn').onclick = (e) => {
   if (!S.active) return;

@@ -316,17 +316,33 @@ function tagbotReply(text, from) {
 
 function maybeBotRespond(msg) {
   if (msg.kind !== 'text') return;
+  // ① 内置 TagBot 规则应答
   const bot = db.agents['TagBot'];
-  if (!bot || msg.from === 'TagBot') return;
-  if (!msg.mentions.includes('TagBot')) return;
-  const channel = msg.channel;
-  // 先「正在输入」，再延迟回帖——速度优先，只留一点点真实感
-  setTimeout(() => pushEvent({ type: 'typing', channel, from: 'TagBot' }), 150);
-  setTimeout(() => {
-    const ch = channelOf(channel);
-    if (ch && ch.type === 'dm' && !ch.members.includes('TagBot')) ch.members.push('TagBot');
-    addMessage(channel, 'TagBot', tagbotReply(msg.text, msg.from));
-  }, 500 + Math.random() * 300);
+  if (bot && msg.from !== 'TagBot' && msg.mentions.includes('TagBot')) {
+    const channel = msg.channel;
+    setTimeout(() => pushEvent({ type: 'typing', channel, from: 'TagBot' }), 150);
+    setTimeout(() => {
+      const ch = channelOf(channel);
+      if (ch && ch.type === 'dm' && !ch.members.includes('TagBot')) ch.members.push('TagBot');
+      addMessage(channel, 'TagBot', tagbotReply(msg.text, msg.from));
+    }, 500 + Math.random() * 300);
+  }
+  // ② 手动添加、开了「离线托管应答」的 agent：@ 它而它不在线时，平台代管回帖；
+  //    真实程序上线（心跳/SSE 恢复）后自动停手，交还给程序。
+  for (const name of msg.mentions) {
+    if (name === msg.from || name === 'TagBot') continue;
+    const a = db.agents[name];
+    if (!a || a.autoReply !== true || isOnline(a)) continue;
+    const channel = msg.channel;
+    const ch0 = channelOf(channel);
+    if (ch0 && ch0.type === 'dm' && !ch0.members.includes(name)) { ch0.members.push(name); }
+    setTimeout(() => pushEvent({ type: 'typing', channel, from: name }), 200);
+    setTimeout(() => {
+      const task = msg.text.replace(new RegExp(`@${name}`, 'g'), '').trim();
+      addMessage(channel, name,
+        `（离线托管应答）@${msg.from} 收到：${task.slice(0, 60) || '（无正文）'}。真实程序持 token 接入后由它接管回帖。`);
+    }, 600 + Math.random() * 400);
+  }
 }
 
 /* ---------------- 在线状态 ---------------- */
@@ -431,6 +447,7 @@ async function route(req, res) {
           if (body.webhookUrl !== undefined) existing.webhookUrl = body.webhookUrl || null;
           if (body.persona) existing.persona = body.persona;
           if (CONTEXTS.has(body.context)) existing.context = body.context;
+          if (body.autoReply !== undefined) existing.autoReply = !!body.autoReply;
           touchPresence(name);
           return json(res, 200, { token: existing.token, me: pubAgent(existing) });
         }
@@ -441,11 +458,14 @@ async function route(req, res) {
         persona: String(body.persona || '').slice(0, 200) || null,
         token: newToken(), webhookUrl: body.webhookUrl || null,
         context,
+        autoReply: kind === 'agent' ? !!body.autoReply : false, // 离线托管应答（网页手动添加常用）
         hue: hueOf(name), createdAt: Date.now(), lastSeen: Date.now(),
       };
       db.agents[name] = agent;
-      touchPresence(name);
-      pushEvent({ type: 'presence', name, online: true });
+      // 只有人类注册即算在线；agent 的在线由它自己的轮询/心跳证明——
+      // 手动添加的 agent 没有真实连接，注册后保持离线（托管应答才能生效）
+      if (agent.kind === 'human') touchPresence(name);
+      pushEvent({ type: 'presence', name, online: agent.kind === 'human' });
       // 新成员只自动加入开放群（isPublic 大厅）；邀请制群由成员拉人（微信语义）
       for (const ch of Object.values(db.channels)) {
         if (ch.type === 'group' && ch.isPublic && !ch.members.includes(name)) {
@@ -648,6 +668,7 @@ function pubAgent(a) {
     name: a.name, kind: a.kind, persona: a.persona, hue: a.hue,
     online: isOnline(a), hasWebhook: !!a.webhookUrl, createdAt: a.createdAt,
     context: a.context || (a.kind === 'human' ? 'channel' : 'mentions'),
+    autoReply: a.kind === 'agent' ? !!a.autoReply : false,
   };
 }
 

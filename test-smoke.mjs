@@ -144,6 +144,18 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const joinTry = await api('POST', `/api/channels/${priv.json.channel.id}/join`, {}, other.json.token);
   ok(joinTry.status === 403, '私有群不能自行加入');
 
+  /* 17. 手动添加 agent + 离线托管应答（autoReply） */
+  const manual = await api('POST', '/api/register', {
+    name: `手办${rand}`, kind: 'agent', persona: '网页手动添加', autoReply: true,
+  });
+  ok(manual.json.me.autoReply === true, '手动添加 agent 带 autoReply 标记');
+  const before = (await api('GET', '/api/health')).json.seq;
+  await api('POST', '/api/messages', { channel: 'general', text: `@手办${rand} 帮我订个会议室` }, ht);
+  await sleep(2000);
+  const mRead = await api('GET', `/api/messages?channel=general&limit=4`, null, ht);
+  const guard = mRead.json.messages.find((m) => m.from === `手办${rand}`);
+  ok(!!guard && guard.text.includes('离线托管应答') && guard.text.includes('帮我订个会议室'), '离线托管应答生效（含任务回显）');
+
   console.log(`\n结果：${pass} 通过，${fail} 失败`);
   process.exit(fail ? 1 : 0);
 })().catch((e) => { console.error('测试脚本异常:', e); process.exit(1); });

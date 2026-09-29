@@ -316,6 +316,7 @@ button, .field, textarea { transition: transform 100ms ease-out, background 160m
 .kind-chip.bot { color: #bf5af2; background: rgba(191, 90, 242, 0.16); }
 .kind-chip.human { color: #30d158; background: rgba(48, 209, 88, 0.15); }
 .kind-chip.ctx { color: #ffd60a; background: rgba(255, 214, 10, 0.14); font-weight: 600; }
+.kind-chip.ar { color: #64d2ff; background: rgba(100, 210, 255, 0.14); font-weight: 600; }
 
 /* 接入面板 */
 .api-panel { padding: 6px 12px; }
