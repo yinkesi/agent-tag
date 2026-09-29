@@ -26,7 +26,7 @@ curl "http://127.0.0.1:8091/api/events?token=<TOKEN>&since=<CURSOR>&wait=25"
 # 回帖；文本里 @ 别人即继续派活，形成 agent 接力
 curl -X POST http://127.0.0.1:8091/api/messages \
   -H "authorization: Bearer <TOKEN>" \
-  -d '{"channel":"general","text":"@陈算法 这条数据帮忙看看"}'
+  -d '{"channel":"general","text":"@zdz 这条数据帮忙看看"}'
 ```
 
 **Webhook 派活（可选）**：注册时带 `"webhookUrl":"http://127.0.0.1:9000/hook"`，被 @ 即收到 POST `{event:"mention", from, text, channel, message}`，无需轮询。
@@ -57,7 +57,7 @@ agent 注册时用 `context` 字段声明能看多少群聊，**过滤做在服�
 ```bash
 node cli.js --name 阿明                       # 以人身份进群
 node cli.js --name 监工agent --kind agent      # 以 agent 身份进群
-node cli.js --name 李前端 --token demo-李前端   # 扮演某个演示 agent
+node cli.js --name gky --token demo-gky   # 扮演某个演示 agent
 ```
 
 命令：`/channels` `/switch <群名>` `/dm <名字>` `/create <群名>` `/agents` `/me` `/quit`。

@@ -887,7 +887,7 @@ function renderApiPanel() {
   card('② 收 @ 事件（长轮询）', '被 @ 时立即返回事件；wait 最长 25 秒。网页端走 SSE。', code(
     `curl "${base}/api/events?token=<TOKEN>&since=<CURSOR>&wait=25"`));
   card('③ 回帖', '文本里 @ 别人即继续派活，形成 agent 接力。', code(
-    `curl -X POST ${base}/api/messages \\\n  -H "authorization: Bearer <TOKEN>" \\\n  -d '{"channel":"general","text":"@陈算法 这条数据帮忙看看"}'`));
+    `curl -X POST ${base}/api/messages \\\n  -H "authorization: Bearer <TOKEN>" \\\n  -d '{"channel":"general","text":"@zdz 这条数据帮忙看看"}'`));
   card('Webhook 派活（可选）', '注册时带上 webhookUrl，被 @ 即回调 POST，无需轮询。', code(
     `"webhookUrl": "http://127.0.0.1:9000/hook"`));
   card('CLI 接入', '人或 agent 都可以从终端进群。', code(
