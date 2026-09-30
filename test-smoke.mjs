@@ -312,6 +312,88 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const g2c = g2state.json.channels.find((c) => c.id === g2.json.channel.id);
   ok(g2c && g2c.owner === `新群主${rand}`, '群主改名后 @owner 落点跟随新名');
 
+  /* 28. 接力熔断（学 AgentConnect hop 上限）：连续 agent 发言超限后 @ 停投，人开口解锁 */
+  const fuseA = await api('POST', '/api/register', { name: `熔断甲${rand}`, kind: 'agent' }, ht);
+  const fuseB = await api('POST', '/api/register', { name: `熔断乙${rand}`, kind: 'agent' }, ht);
+  const fuseGrp = await api('POST', '/api/channels', { name: `熔断间${rand}`, members: [`熔断甲${rand}`, `熔断乙${rand}`] }, ht);
+  const fg = fuseGrp.json.channel.id;
+  // 预置 8 条连续 agent 发言（绕过派活：直接用两个 agent token 裸发）
+  for (let i = 0; i < 8; i++) {
+    await api('POST', '/api/messages', { channel: fg, text: `接力 ${i}` }, i % 2 ? fuseA.json.token : fuseB.json.token);
+  }
+  const seqFuse = (await api('GET', '/api/health')).json.seq;
+  const fuseMsg = await api('POST', '/api/messages', { channel: fg, text: `@熔断乙${rand} 还能收到吗` }, fuseA.json.token);
+  await sleep(400);
+  const fuseTrack = await api('GET', `/api/track?seq=${fuseMsg.json.message.seq}`, null, ht);
+  ok(!fuseTrack.json.receipts[`熔断乙${rand}`], '熔断后 @ 不再排队投递');
+  const fuseSys = await api('GET', `/api/messages?channel=${fg}&limit=3`, null, ht);
+  ok(fuseSys.json.messages.some((m) => m.kind === 'system' && m.text.includes('熔断')), '熔断时发系统公告');
+  // 人开口解锁
+  await api('POST', '/api/messages', { channel: fg, text: '人类介入' }, ht);
+  const unfuse = await api('POST', '/api/messages', { channel: fg, text: `@熔断乙${rand} 现在呢` }, fuseA.json.token);
+  const unfuseTrack = await api('GET', `/api/track?seq=${unfuse.json.message.seq}`, null, ht);
+  ok(unfuseTrack.json.receipts[`熔断乙${rand}`] === 'queued', '人类开口后投递恢复');
+
+  /* 29. webhook HMAC 签名 + 5xx 重试（学 TagIt 纪律） */
+  const crypto2 = await import('node:crypto');
+  const hookHits = [];
+  const hookSrv = (await import('node:http')).createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => (body += c));
+    req.on('end', () => {
+      hookHits.push({ headers: req.headers, body });
+      res.statusCode = hookHits.length === 1 ? 500 : 200; // 首次 5xx，重试成功
+      res.end('ok');
+    });
+  });
+  await new Promise((r) => hookSrv.listen(0, '127.0.0.1', r));
+  const hookPort = hookSrv.address().port;
+  const hookAg = await api('POST', '/api/register', {
+    name: `钩子员${rand}`, kind: 'agent', webhookUrl: `http://127.0.0.1:${hookPort}/hook`,
+  }, ht);
+  await api('POST', '/api/messages', { channel: 'general', text: `@钩子员${rand} 验签` }, ht);
+  await sleep(5500); // 等 1s 退避重试
+  hookSrv.close();
+  ok(hookHits.length === 2, '5xx 后按退避重试（2 次到达）');
+  if (hookHits.length) {
+    const h = hookHits[0].headers;
+    const ts = h['x-agent-tag-timestamp'];
+    const sig = h['x-agent-tag-signature'];
+    const expectSig = 'sha256=' + crypto2.createHmac('sha256', hookAg.json.token || hookAg.token).update(ts + '.' + hookHits[0].body).digest('hex');
+    ok(!!ts && !!sig && sig === expectSig, 'HMAC 签名头正确（密钥=agent token）');
+  } else ok(false, 'HMAC 签名头正确（未收到请求）');
+
+  /* 30. 事件环回补（学 CCCC 账本即事实）：游标落在环外时从消息表补发 @ */
+  const backA = await api('POST', '/api/register', { name: `补收员${rand}`, kind: 'agent' }, ht);
+  const bSeq = (await api('GET', '/api/health')).json.seq;
+  await api('POST', '/api/messages', { channel: 'general', text: `@补收员${rand} 环外的召唤` }, ht);
+  // 直接用远早于环起点的游标拉取（模拟环被裁剪/重启冲刷）
+  const backEvt = await api('GET', `/api/events?token=${encodeURIComponent(backA.json.token)}&since=1&wait=0`);
+  ok(backEvt.json.backfill === true || (backEvt.json.events || []).length > 0, '环外游标触发回补');
+  ok((backEvt.json.events || []).some((e) => e.type === 'message' && (e.message.mentions || []).includes(`补收员${rand}`)),
+    '回补包含环外的 @ 消息');
+
+  /* 31. bridge-cli 自动 ack：fake agent 流程后回执应到 read */
+  const autoAg = await api('POST', '/api/register', { name: `自ack工${rand}`, kind: 'agent' }, ht);
+  await api('POST', '/api/agents/spawn-cli', { name: `自ack工${rand}`, cmd: 'node test/fake-agent.mjs' }, ht);
+  const tAuto = Date.now();
+  await api('POST', '/api/messages', { channel: 'general', text: `@自ack工${rand} 认领测试` }, ht);
+  // 先取到任务消息的 seq，再轮询它的回执
+  let autoTargetSeq = null;
+  for (let i = 0; i < 6 && !autoTargetSeq; i++) {
+    const dm = await api('GET', `/api/messages?channel=general&limit=5`, null, ht);
+    autoTargetSeq = (dm.json.messages || []).find((m) => m.text.includes('认领测试') && m.from === human.json.me.name && m.ts > tAuto)?.seq ?? null;
+    if (!autoTargetSeq) await sleep(300);
+  }
+  let autoRead = null;
+  for (let i = 0; i < 20 && autoTargetSeq && !autoRead; i++) {
+    await sleep(500);
+    const tk = await api('GET', `/api/track?seq=${autoTargetSeq}`, null, ht);
+    if (tk.json.receipts?.[`自ack工${rand}`] === 'read') autoRead = tk.json;
+  }
+  ok(!!autoRead, 'bridge-cli 认领任务后自动记「已读」（✓✓ 闭环）');
+  await api('POST', '/api/agents/spawn-cli', { name: `自ack工${rand}`, stop: true }, ht);
+
   console.log(`\n结果：${pass} 通过，${fail} 失败`);
   process.exit(fail ? 1 : 0);
 })().catch((e) => { console.error('测试脚本异常:', e); process.exit(1); });

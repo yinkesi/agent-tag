@@ -143,6 +143,7 @@ function runCli(task) {
         if (!(m.mentions || []).includes(NAME)) continue;
         // 先回执再干活（学 TagIt/open-tag 的 ack）：CLI 冷启动+推理可达数十秒，静默太久
         api('/api/messages', { token, channel: m.channel, text: `🫡 收到 @${m.from} 的任务，入队执行中（底层 \`${CMD}\`，完成即回帖）` }).catch(() => {});
+        api('/api/ack', { token, seq: m.seq }).catch(() => {}); // 认领即「已读」：发送方看到 ✓✓（学 CCCC mail.read）
         // 任务文本 = 原文去 @前缀 + 消息携带技能(#标签)与默认技能的全文注入 + 知识库指引
         const skillNames = [...new Set([...(m.skills || []), ...(ME.skills || [])])];
         let skillBlock = '';

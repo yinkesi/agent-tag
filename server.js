@@ -27,7 +27,8 @@ const SKILLS_DIR = path.join(ROOT, 'skills'); // 共享技能库：一技能一�
 const KB_DIR = path.join(ROOT, 'kb');         // 共享知识库：markdown，文件名即条目名
 
 const ONLINE_TTL_MS = 30_000;     // 超过该时长无心跳/SSE 视为离线
-const EVENT_RING = 2000;          // 内存事件环形缓冲上限
+const EVENT_RING = Number(process.env.AGENT_TAG_EVENT_RING || 2000); // 事件环形缓冲上限（可调小供测试）
+const MAX_AGENT_CHAIN = Number(process.env.AGENT_TAG_MAX_CHAIN || 8); // 接力熔断：连续 agent 发言上限（学 AgentConnect MAX_AGENT_CALL_HOPS）
 const MSG_KEEP = 4000;            // 持久化消息保留条数
 const BODY_LIMIT = 256 * 1024;
 
@@ -64,7 +65,9 @@ function saveNow() {
   clearTimeout(saveTimer);
   try {
     fs.mkdirSync(DATA_DIR, { recursive: true });
-    fs.writeFileSync(DB_FILE, JSON.stringify(db));
+    const tmp = DB_FILE + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(db));
+    fs.renameSync(tmp, DB_FILE); // 原子替换，崩溃不留半截 JSON
   } catch {}
 }
 
@@ -143,11 +146,17 @@ const sseClients = new Set(); // { res, name }
 const eventWaiters = new Set(); // 长轮询等待者，事件到达即刻唤醒（不做周期轮询）
 const spawnedBridges = new Map(); // name -> child，服务端拉起的 LLM 桥进程（模块级，跨请求存活）
 
-// 持久化：异步合并写（突发消息只落一次盘），启动时建好目录
+// 持久化：异步合并写（突发消息只落一次盘）+ 原子替换
+// （学 CCCC 账本的崩溃纪律，朴素版：先写临时文件再 rename，
+//   崩溃最多丢最后一次合并，绝不会留下半截 JSON 读不起来）
 function scheduleSave() {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
-    fs.writeFile(DB_FILE, JSON.stringify(db), (err) => { if (err) console.error('[save]', err.message); });
+    const tmp = DB_FILE + '.tmp';
+    fs.writeFile(tmp, JSON.stringify(db), (err) => {
+      if (err) return console.error('[save]', err.message);
+      fs.rename(tmp, DB_FILE, (err2) => { if (err2) console.error('[save:rename]', err2.message); });
+    });
   }, 800);
 }
 
@@ -321,7 +330,25 @@ function addMessage(channel, from, text, opts = {}) {
   const ch = channelOf(channel);
   // @ 解析在服务端：token（@all/@owner）存原文 + 具体名，读时展开（routing.js 唯一实现）
   const mentions = opts.kind ? [] : routing.parseMentions(text, Object.keys(db.agents));
-  const targets = routing.expandMentions(mentions, ch, db.agents, { exclude: [from] });
+  let targets = routing.expandMentions(mentions, ch, db.agents, { exclude: [from] });
+  // 接力熔断（学 AgentConnect MAX_AGENT_CALL_HOPS 的朴素版）：
+  // 同频道连续 agent 发言超过上限即不再投递新的 @ ——两个 agent 互相 @ 打乒乓时，
+  // 链条在人缺席的情况下不会烧穿 token。人来一句话即解锁。
+  const fromKind = opts.fromKind || db.agents[from]?.kind || 'human';
+  let tripped = false;
+  let chain = 0;
+  if (fromKind !== 'human' && ch && ch.type === 'group') {
+    for (let i = db.messages.length - 1; i >= 0; i--) {
+      const m = db.messages[i];
+      if (m.channel !== channel || m.kind === 'system') continue;
+      if ((m.fromKind || 'human') === 'human') break; // 人开口，链条归零
+      chain++;
+    }
+    if (chain >= MAX_AGENT_CHAIN) {
+      tripped = true;
+      targets = [];
+    }
+  }
   const msg = {
     seq: nextSeq(),
     channel,
@@ -333,7 +360,7 @@ function addMessage(channel, from, text, opts = {}) {
     skills,
     replyTo: opts.replyTo || undefined,
     ts: Date.now(),
-    fromKind: opts.fromKind || db.agents[from]?.kind || 'human',
+    fromKind,
     hue: opts.hue ?? hueOf(from),
   };
   for (const t of targets) {
@@ -342,8 +369,12 @@ function addMessage(channel, from, text, opts = {}) {
   db.messages.push(msg);
   if (db.messages.length > MSG_KEEP) db.messages.splice(0, db.messages.length - MSG_KEEP);
   pushEvent({ type: 'message', message: msg });
+  if (tripped) {
+    sysMsg(channel, `⚡ 接力熔断：本群已连续 ${chain} 条 agent 发言（上限 ${MAX_AGENT_CHAIN}），新消息的 @ 暂停投递——人来一句话即可恢复。`);
+  }
   save();
   deliverMentions(msg, targets);
+  msg._tripped = tripped; // 供 maybeBotRespond 判断（不落库，内存标记）
   return msg;
 }
 
@@ -366,7 +397,13 @@ function deliverMentions(msg, targets) {
   }
 }
 
-function fireWebhook(agent, msg) {
+// webhook 签名（学 TagIt 的 HMAC 纪律）：密钥=该 agent 自己的 token（本就是共享秘密）。
+// 头两枚：x-agent-tag-timestamp（毫秒）与 x-agent-tag-signature（sha256=hex(ts + "." + body)）。
+function signPayload(token, ts, body) {
+  return 'sha256=' + crypto.createHmac('sha256', token).update(ts + '.' + body).digest('hex');
+}
+
+function fireWebhook(agent, msg, attempt = 1) {
   const ch = channelOf(msg.channel);
   const body = JSON.stringify({
     event: 'mention',
@@ -376,27 +413,43 @@ function fireWebhook(agent, msg) {
     message: msg,
   });
   const url = agent.webhookUrl;
+  const MAX_TRY = 3;
+  const retry = (reason) => {
+    if (attempt >= MAX_TRY) return logHook(agent.name, url, `GIVEUP(${attempt}) ${reason}`);
+    const delay = 1000 * 4 ** (attempt - 1); // 1s / 4s / 16s
+    logHook(agent.name, url, `RETRY ${attempt}->${attempt + 1} in ${delay}ms (${reason})`);
+    setTimeout(() => fireWebhook(agent, msg, attempt + 1), delay);
+  };
   const timeout = setTimeout(abort, 5000);
   function abort() { try { req.destroy(); } catch {} }
   let req;
   try {
+    const ts = String(Date.now());
     req = http.request(url, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) },
+      headers: {
+        'content-type': 'application/json',
+        'content-length': Buffer.byteLength(body),
+        'x-agent-tag-timestamp': ts,
+        'x-agent-tag-signature': signPayload(agent.token, ts, body),
+      },
       timeout: 5000,
     }, (res) => {
       res.resume();
       logHook(agent.name, url, res.statusCode);
       if (res.statusCode >= 200 && res.statusCode < 300) {
         if (markReceipt(msg, agent.name, 'delivered')) save(); // 对端确认收到，才配得上「已送达」
+      } else if (res.statusCode >= 500) {
+        retry('HTTP ' + res.statusCode); // 5xx 才值得重试；4xx 是调用方的问题
       }
     });
-    req.on('timeout', abort);
-    req.on('error', (e) => logHook(agent.name, url, 'ERR ' + e.message));
+    req.on('timeout', () => { abort(); retry('timeout'); });
+    req.on('error', (e) => retry(e.message));
     req.end(body);
   } catch (e) {
     logHook(agent.name, url, 'ERR ' + e.message);
     clearTimeout(timeout);
+    retry(e.message);
   }
 }
 
@@ -440,6 +493,7 @@ function tagbotReply(text, from) {
 
 function maybeBotRespond(msg) {
   if (msg.kind !== 'text') return;
+  if (msg._tripped) return; // 接力熔断期间，平台 bot 与托管一并安静
   // ① 内置 TagBot 规则应答
   const bot = db.agents['TagBot'];
   if (bot && msg.from !== 'TagBot' && msg.mentions.includes('TagBot')) {
@@ -906,21 +960,37 @@ async function route(req, res) {
       const waitMs = Math.min(Number(u.searchParams.get('wait')) || 0, 25) * 1000;
       const deadline = Date.now() + waitMs;
       for (;;) {
+        // 事件环回补（学 CCCC「账本即事实」/ AgentConnect ACK 前落库的朴素版）：
+        // 客户端游标落在环外（重启冲刷/环溢出裁剪）时，从持久消息表按可见性合成事件补发，
+        // 离线 agent 的 @ 不因环裁剪而丢——typing/presence 等瞬态事件可丢，消息不可丢。
+        const markDelivered = (evts) => {
+          if (me.kind === 'human') return;
+          let touched = false;
+          for (const e of evts) {
+            if (e.type !== 'message' || !e.message) continue;
+            const c = channelOf(e.message.channel);
+            if (c && routing.mentionsTarget(e.message.mentions, me.name, { isOwner: c.owner === me.name })) {
+              touched = markReceipt(e.message, me.name, 'delivered') || touched;
+            }
+          }
+          if (touched) save();
+        };
+        const ringStart = db.events.length ? db.events[0].seq : Infinity;
+        if (since < ringStart - 1) {
+          const missed = db.messages
+            .filter((m) => m.seq > since && visibleTo(me.name, { type: 'message', message: m }))
+            .slice(-300)
+            .map((m) => ({ type: 'message', message: m, seq: m.seq }));
+          if (missed.length) {
+            markDelivered(missed); // 补发拉走同样记「已送达」
+            return json(res, 200, { events: missed, cursor: db.seq, backfill: true });
+          }
+          return json(res, 200, { events: [], cursor: db.seq, reset: true });
+        }
         const evts = db.events.filter((e) => e.seq > since && visibleTo(me.name, e));
         if (evts.length) {
           since = evts[evts.length - 1].seq;
-          // runtime 亲自拉走 = 「已送达」（学 CCCC runtime.delivery：只记事实，不猜）
-          if (me.kind !== 'human') {
-            let touched = false;
-            for (const e of evts) {
-              if (e.type !== 'message' || !e.message) continue;
-              const c = channelOf(e.message.channel);
-              if (c && routing.mentionsTarget(e.message.mentions, me.name, { isOwner: c.owner === me.name })) {
-                touched = markReceipt(e.message, me.name, 'delivered') || touched;
-              }
-            }
-            if (touched) save();
-          }
+          markDelivered(evts); // runtime 亲自拉走 = 「已送达」（学 CCCC runtime.delivery：只记事实，不猜）
           return json(res, 200, { events: evts, cursor: since });
         }
         if (db.seq < since) return json(res, 200, { events: [], cursor: db.seq, reset: true });

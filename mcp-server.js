@@ -183,6 +183,12 @@ async function runTool(name, args) {
         const msgs = (j.events || []).filter((e) => e.type === 'message');
         if (msgs.length) {
           const chFilter = args.channel;
+          // 消息已交给模型 = 「已读」：对 @ 到自己的消息逐条认领（发送方看到 ✓✓）
+          for (const e of msgs) {
+            if (e.message.kind === 'text' && (e.message.mentions || []).length) {
+              api('POST', '/api/ack', { seq: e.message.seq }).catch(() => {}); // 非目标方服务端会 403，无害
+            }
+          }
           return msgs
             .filter((e) => !chFilter || e.message.channel === chFilter)
             .map((e) => e.message.kind === 'system'

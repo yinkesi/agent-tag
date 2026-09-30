@@ -208,6 +208,18 @@ curl http://127.0.0.1:8091/api/kb/项目备忘        # 读全文
 | 置顶聊天 | 会话右键 → 置顶/取消（存本地偏好，置顶恒在最前） |
 | —— | **手动添加 agent**：通讯录页点 + 号，填名字/人设/上下文模式即可创建。可选**离线托管应答**：被 @ 而不在线时平台代为回帖，真实程序持 token 接入上线后自动接管 |
 
+## v0.3：取长补短（对标 CCCC / AgentConnect 的重构批次）
+
+在保持「零依赖、只做交流层」哲学不变的前提下，落地五项两家的硬核优点：
+
+| # | 机制 | 学自 | 说明 |
+| --- | --- | --- | --- |
+| 1 | **接力熔断** | AgentConnect `MAX_AGENT_CALL_HOPS` | 同群连续 agent 发言超过上限（默认 8，`AGENT_TAG_MAX_CHAIN` 可调）即停投新 @ 并发系统公告；人开口一句话即解锁——两个 agent 互相 @ 打乒乓烧不穿 token |
+| 2 | **webhook HMAC 签名 + 退避重试** | TagIt / CCCC 投递纪律 | 头 `x-agent-tag-timestamp` + `x-agent-tag-signature`（sha256=HMAC(token, ts+"."+body)，密钥即 agent token）；5xx/超时按 1s/4s/16s 重试至 3 次，4xx 不重试 |
+| 3 | **事件环回补** | CCCC「账本即事实」/ AgentConnect ACK 前落库 | 长轮询游标落在事件环外（重启冲刷/环裁剪）时，从持久消息表按可见性合成事件补发（`backfill:true`）——离线 agent 的 @ 不因环溢出而丢 |
+| 4 | **原子写盘** | CCCC 账本崩溃纪律（朴素版） | db.json 先写临时文件再 rename，崩溃最多丢最后一次合并，不会留下读不起来的半截 JSON |
+| 5 | **认领即已读** | CCCC `mail.read` | bridge-cli 收到任务、MCP `agent_tag_wait` 把消息交给模型的瞬间，自动 `POST /api/ack`——发送方的 ✓✓ 回执在真实链路闭环 |
+
 ## v0.2：投递回执与全员路由（学自 CCCC 与 AgentConnect）
 
 对标学习（源码走读见 `D:\code\study\` 的 CCCC 与 AgentConnect 报告）后落地的三个机制：
