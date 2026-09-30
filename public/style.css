@@ -434,6 +434,8 @@ button, .field, textarea { transition: transform 100ms ease-out, background 160m
 .bubble .mention.skill-tag { color: #bf5af2; background: rgba(191, 90, 242, 0.16); }
 .msg.mine .bubble .mention.skill-tag { color: #fff; background: rgba(255, 255, 255, 0.22); }
 .msg-time { font-size: 10.5px; color: var(--text-3); padding: 0 4px; }
+.msg-receipts { font-size: 10px; color: var(--text-3); opacity: 0.85; padding: 0 4px; text-align: right; }
+.msg.mine .msg-receipts { text-align: right; }
 
 .sysmsg {
   align-self: center;

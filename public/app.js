@@ -219,6 +219,20 @@ function handleEvent(evt) {
       updateTitleBadge();
     }
     if (m.mentions?.includes(S.me.name) && m.from !== S.me.name) toast(`${m.from} 在群里 @ 了你`);
+    else if (m.from !== S.me.name && ch && ch.type === 'group' &&
+      (m.mentions?.includes('@all') ||
+        (m.mentions?.includes('@owner') && ch.owner === S.me.name))) {
+      toast(`${m.from} 在群里 @ 了${m.mentions.includes('@all') ? '全群' : '你（群主）'}`);
+    }
+  } else if (evt.type === 'receipt') {
+    // 投递回执：有人认领（read）→ 就地刷新自己消息上的 ✓✓
+    const list = S.msgs.get(evt.channel);
+    const m = list && list.find((x) => x.seq === evt.msgSeq);
+    if (m) {
+      m.receipts = m.receipts || {};
+      m.receipts[evt.name] = evt.state;
+      if (evt.channel === S.active) renderMessages();
+    }
   } else if (evt.type === 'typing') {
     if (evt.from === S.me.name) return;
     if (!S.typing.has(evt.channel)) S.typing.set(evt.channel, new Map());
@@ -533,6 +547,19 @@ function renderMsg(box, m, merged) {
   t.textContent = fmtClock(m.ts);
   body.appendChild(t);
 
+  // 投递回执（v0.2）：自己发的群聊消息显示 送达/已读 概况（queued→delivered→read，服务端事实）
+  if (mine && m.receipts && S.channels.get(m.channel)?.type === 'group') {
+    const vals = Object.values(m.receipts);
+    if (vals.length) {
+      const r = document.createElement('div');
+      r.className = 'msg-receipts';
+      const read = vals.filter((s) => s === 'read').length;
+      const done = vals.filter((s) => s !== 'queued').length;
+      r.textContent = read > 0 ? `✓✓ 已读 ${read}/${vals.length}` : (done > 0 ? `✓ 已送达 ${done}/${vals.length}` : '… 待投递');
+      body.appendChild(r);
+    }
+  }
+
   // hover 操作条（引用 / 撤回——撤回限本人 2 分钟内，微信语义）
   const acts = document.createElement('div');
   acts.className = 'msg-actions';
@@ -762,13 +789,27 @@ async function updateMentionPop() {
     .filter((n) => n.toLowerCase().includes(q.query.toLowerCase()))
     .sort((a, b) => (S.agents.get(b)?.online - S.agents.get(a)?.online))
     .slice(0, 8);
-  if (!hit.length) { pop.classList.add('hidden'); return; }
+  // 保留 token 置顶：@all 叫全群、@owner 只叫群主（服务端读时展开，改名不失效）
+  const toks = (ch && ch.type === 'group' ? ['all', 'owner'] : [])
+    .filter((t) => t.includes(q.query.toLowerCase()))
+    .map((t) => ({ t, hint: t === 'all' ? '全群派活' : (ch.owner === S.me.name ? '只叫你（群主）' : '只叫群主') }));
+  if (!hit.length && !toks.length) { pop.classList.add('hidden'); return; }
   pop.innerHTML = '';
+  for (const { t, hint } of toks) {
+    const it = document.createElement('button');
+    it.type = 'button';
+    it.className = 'mention-item' + (!pop.firstChild ? ' sel' : '');
+    it.append(avatarEl('📣', 210, 'sm'),
+      Object.assign(document.createElement('span'), { className: 'mi-name', textContent: '@' + t }),
+      Object.assign(document.createElement('span'), { className: 'mi-persona', textContent: hint }));
+    it.onclick = () => insertMention(t, q);
+    pop.appendChild(it);
+  }
   hit.forEach((n, i) => {
     const a = S.agents.get(n);
     const it = document.createElement('button');
     it.type = 'button';
-    it.className = 'mention-item' + (i === 0 ? ' sel' : '');
+    it.className = 'mention-item' + (!pop.firstChild && i === 0 ? ' sel' : '');
     it.append(avatarEl(n, a?.hue ?? 220, 'sm'), Object.assign(document.createElement('span'), { className: 'mi-name', textContent: n }),
       Object.assign(document.createElement('span'), { className: 'mi-persona', textContent: a?.persona || (a?.kind === 'human' ? '人类' : '') }));
     if (a) it.children[0].appendChild(onlineDot(a));

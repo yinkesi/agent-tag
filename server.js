@@ -16,6 +16,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
+const routing = require('./routing.js'); // @ 路由纯函数：解析/展开/可见性的唯一实现
 
 const PORT = Number(process.env.PORT || 8091);
 const ROOT = __dirname;
@@ -36,7 +37,7 @@ let db = null;
 let saveTimer = null;
 
 function defaultDb() {
-  return { seq: 0, agents: {}, channels: {}, messages: [], events: [] };
+  return { seq: 0, agents: {}, channels: {}, messages: [], events: [], dedup: {} };
 }
 
 function loadDb() {
@@ -46,6 +47,12 @@ function loadDb() {
     db = defaultDb();
     seed();
   }
+  // 轻迁移：群主缺省按位置推导=首位成员（学自 CCCC effective_role 的位置推导，不另落盘）；
+  // 历史数据没有 dedup 表就补一张。
+  for (const ch of Object.values(db.channels)) {
+    if (ch.type === 'group' && !ch.owner) ch.owner = ch.members[0] || null;
+  }
+  if (!db.dedup) db.dedup = {};
 }
 
 function save() {
@@ -91,17 +98,18 @@ function seed() {
     webhookUrl: null, hue: 210, createdAt: now, lastSeen: now,
   };
 
-  const mkGroup = (id, name, topic) => {
-    db.channels[id] = { id, name, topic, type: 'group', members: [], createdAt: now, isPublic: true }; // 演示大厅群开放
+  const mkGroup = (id, name, topic, owner) => {
+    // owner=群主（微信语义）；演示群群主由角色设定：产品经理管研发群，gky 管水聊群
+    db.channels[id] = { id, name, topic, type: 'group', members: [], owner, createdAt: now, isPublic: true };
   };
-  mkGroup('general', '产品研发群', '@agent 认领任务，讨论直接回帖');
-  mkGroup('lounge', '摸鱼水聊群', 'agent 们下班后的地方');
+  mkGroup('general', '产品研发群', '@agent 认领任务，讨论直接回帖', 'gbc');
+  mkGroup('lounge', '摸鱼水聊群', 'agent 们下班后的地方', 'gky');
 
   const msg = (channel, from, text, hrsAgo, mins = 0) => {
     const seq = nextSeq();
     db.messages.push({
       seq, channel, from, kind: 'text', text,
-      mentions: parseMentions(text),
+      mentions: routing.parseMentions(text, Object.keys(db.agents)),
       ts: now - hrsAgo * H - mins * 60_000,
       fromKind: db.agents[from]?.kind || 'human',
       hue: hueOf(from),
@@ -263,6 +271,17 @@ function visibleTo(name, evt) {
     if (!ch) return false;
     return ch.type === 'dm' ? ch.members.includes(name) : (ch.isPublic || ch.members.includes(name));
   }
+  if (evt.type === 'receipt') {
+    // 回执事件同样走可见性：隔离 agent 只看自己的认领，以及自己发出消息的 ✓✓ 更新
+    const ch = channelOf(evt.channel);
+    if (!ch) return false;
+    if (ch.type === 'dm') return ch.members.includes(name);
+    if (!(ch.isPublic || ch.members.includes(name))) return false;
+    const a = db.agents[name];
+    if (!a || a.kind === 'human' || (a.context || 'mentions') === 'channel') return true;
+    const m = db.messages.find((x) => x.seq === evt.msgSeq);
+    return evt.name === a.name || !!(m && m.from === a.name);
+  }
   if (evt.type === 'typing') {
     const ch = channelOf(evt.channel);
     return ch ? (ch.type === 'dm' ? ch.members.includes(name) : true) : false;
@@ -274,61 +293,57 @@ function visibleTo(name, evt) {
     if (!(ch.isPublic || ch.members.includes(name))) return false; // 邀请制群：非成员不可见
     const a = db.agents[name];
     if (!a || a.kind === 'human' || (a.context || 'mentions') === 'channel') return true;
-    return canReadMessage(a, evt.message); // 上下文隔离的 agent 只收与自己相关的事件
+    return routing.canReadMessage(a, evt.message, ch); // 上下文隔离的 agent 只收与自己相关的事件
   }
   return true;
 }
 
-// 上下文可见性（仅作用于群聊；私聊当事人始终全量可见）
-//   channel  —— 全群历史（需显式开启）
-//   mentions —— 默认：只有 @ 自己的、自己发的、系统消息
-//   none     —— 连 @ 自己的都只在本条事件里给，历史里不补
-function canReadMessage(a, m) {
-  if (m.kind === 'system') return true;
-  if (m.from === a.name) return true;
-  if (a.context === 'none') return false;
-  return (m.mentions || []).includes(a.name);
-}
+// 上下文可见性 moved to routing.js（canReadMessage）：投递、历史、事件流三处共用同一实现
 
 /* ---------------- 消息 ---------------- */
 
-function parseMentions(text) {
-  const norm = String(text).normalize('NFC'); // 对 NFD 输入免疫（与注册名同口径）
-  const names = Object.keys(db.agents).sort((a, b) => b.length - a.length); // 最长优先
-  const found = new Set();
-  let i = 0;
-  while (i < norm.length) {
-    if (norm[i] !== '@') { i++; continue; }
-    let hit = null;
-    for (const n of names) {
-      // 同一 @ 位置只认最长的名字（防「@abc2」误伤「@abc」），命中即消费整段
-      if (norm.startsWith('@' + n, i)) { hit = n; break; }
-    }
-    if (hit) { found.add(hit); i += 1 + hit.length; } else i++;
-  }
-  return [...found];
+// 回执三态（学自 CCCC 的投递四事实，裁剪为 agent-tag 尺度）：
+//   queued    —— 已为该 agent 排队（事件环里等着，离线也能补收）
+//   delivered —— runtime 真的拿到了（长轮询拉到 / webhook 2xx）
+//   read      —— agent 显式 POST /api/ack 认领；服务端从不替 runtime 谎报已读
+const RECEIPT_RANK = { queued: 0, delivered: 1, read: 2 };
+
+function markReceipt(msg, name, state) {
+  if (!msg || msg.kind === 'system' || !name) return false;
+  msg.receipts = msg.receipts || {};
+  if ((RECEIPT_RANK[msg.receipts[name]] ?? -1) >= RECEIPT_RANK[state]) return false;
+  msg.receipts[name] = state;
+  return true;
 }
 
 function addMessage(channel, from, text, opts = {}) {
   const skills = opts.kind ? [] : parseSkillTags(text); // #技能名 → 消息携带技能（与 @ 并列的消息语法）
+  const ch = channelOf(channel);
+  // @ 解析在服务端：token（@all/@owner）存原文 + 具体名，读时展开（routing.js 唯一实现）
+  const mentions = opts.kind ? [] : routing.parseMentions(text, Object.keys(db.agents));
+  const targets = routing.expandMentions(mentions, ch, db.agents, { exclude: [from] });
   const msg = {
     seq: nextSeq(),
     channel,
     from,
     kind: opts.kind || 'text',
     text,
-    mentions: opts.kind ? [] : parseMentions(text),
+    mentions,
+    receipts: {},
     skills,
     replyTo: opts.replyTo || undefined,
     ts: Date.now(),
     fromKind: opts.fromKind || db.agents[from]?.kind || 'human',
     hue: opts.hue ?? hueOf(from),
   };
+  for (const t of targets) {
+    if (db.agents[t]?.kind === 'agent') msg.receipts[t] = 'queued'; // 回执只记外部 runtime，平台 bot 与人不在列
+  }
   db.messages.push(msg);
   if (db.messages.length > MSG_KEEP) db.messages.splice(0, db.messages.length - MSG_KEEP);
   pushEvent({ type: 'message', message: msg });
   save();
-  deliverMentions(msg);
+  deliverMentions(msg, targets);
   return msg;
 }
 
@@ -342,14 +357,12 @@ function sysMsg(channel, text, ts) {
   return msg;
 }
 
-// @ 到谁就把 mention 事件投给谁：webhook 优先，其余靠长轮询/SSE 拉取（持久，离线补收）
-function deliverMentions(msg) {
-  for (const name of msg.mentions) {
+// @ 展开后的投递：webhook 优先（2xx 即记「已送达」），其余靠长轮询/SSE 拉取（拉到也记「已送达」）
+function deliverMentions(msg, targets) {
+  for (const name of targets) {
     const agent = db.agents[name];
-    if (!agent || name === msg.from) continue;
-    if (agent.webhookUrl) {
-      fireWebhook(agent, msg);
-    }
+    if (!agent || agent.kind === 'human' || !agent.webhookUrl) continue;
+    fireWebhook(agent, msg);
   }
 }
 
@@ -371,7 +384,13 @@ function fireWebhook(agent, msg) {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) },
       timeout: 5000,
-    }, (res) => { res.resume(); logHook(agent.name, url, res.statusCode); });
+    }, (res) => {
+      res.resume();
+      logHook(agent.name, url, res.statusCode);
+      if (res.statusCode >= 200 && res.statusCode < 300) {
+        if (markReceipt(msg, agent.name, 'delivered')) save(); // 对端确认收到，才配得上「已送达」
+      }
+    });
     req.on('timeout', abort);
     req.on('error', (e) => logHook(agent.name, url, 'ERR ' + e.message));
     req.end(body);
@@ -395,6 +414,7 @@ function tagbotReply(text, from) {
       `· 「时间」报当前时间`,
       `· 「谁在」报在线名单`,
       `· 「骰子」掷一个 d20`,
+      `· 补全选 all / owner：@全群派活 / 只叫群主（回执用 /api/track 查）`,
       `· 「接入」教你怎么把真模型 agent 拉进群`,
       `· 其它内容我会原样复读确认链路`,
     ].join('\n');
@@ -545,6 +565,7 @@ async function route(req, res) {
         : kind === 'human' ? 'channel' : 'mentions'; // agent 默认隔离：只看与自己相关的消息
       if (!name || name.length > 24) return json(res, 400, { error: '名字不能为空且不超过 24 字符' });
       if (/[\s@]/.test(name)) return json(res, 400, { error: '名字里不能有空格或 @' });
+      if (routing.RESERVED.has(name.toLowerCase())) return json(res, 400, { error: '「all / owner」是路由保留字，不能用作名字' });
       const existing = db.agents[name];
       if (existing) {
         if (body.token && body.token === existing.token) { // 持证重登
@@ -628,6 +649,7 @@ async function route(req, res) {
       const child = spawn(process.execPath, [
         path.join(ROOT, 'bridge-agent.js'),
         '--name', name, '--base-url', baseUrl, '--model', model,
+        '--server', `http://127.0.0.1:${PORT}`, // 回连本服务（默认写死 8091，换端口就断）
         '--token', target.token, // 持该 agent 的 token 注册，避免 409
         '--persona', target.persona || `${name}（本地模型驱动）`,
         '--hello', '0',
@@ -649,6 +671,7 @@ async function route(req, res) {
       if (me.kind !== 'human' && me.name !== from) return json(res, 403, { error: '只能改自己的名字' });
       if (!to || to.length > 24) return json(res, 400, { error: '新名字不能为空且不超过 24 字符' });
       if (/[\s@]/.test(to)) return json(res, 400, { error: '新名字里不能有空格或 @' });
+      if (routing.RESERVED.has(to.toLowerCase())) return json(res, 400, { error: '「all / owner」是路由保留字，不能用作名字' });
       if (db.agents[to]) return json(res, 409, { error: `「${to}」已被占用` });
 
       delete db.agents[from];
@@ -658,6 +681,7 @@ async function route(req, res) {
       for (const ch of Object.values(db.channels)) {
         const i = ch.members.indexOf(from);
         if (i !== -1) ch.members[i] = to;
+        if (ch.owner === from) ch.owner = to; // 群主改名，@owner 落点跟随（存原文读时展开也救不了这里）
       }
       for (const m of db.messages) {
         if (m.from === from) m.from = to; // 历史消息跟随新名字（微信语义）
@@ -692,6 +716,7 @@ async function route(req, res) {
       const child = spawn(process.execPath, [
         path.join(ROOT, 'bridge-cli.js'),
         '--name', name, '--cmd', cmd,
+        '--server', `http://127.0.0.1:${PORT}`, // 回连本服务（默认写死 8091，换端口就断）
         '--token', target.token,
         '--persona', target.persona || `${name}（${cmd} 驱动的实干 agent）`,
         ...(cwd ? ['--cwd', cwd] : []),
@@ -751,7 +776,7 @@ async function route(req, res) {
       const id = 'g_' + crypto.randomBytes(5).toString('hex');
       const ch = {
         id, name, topic: String(body.topic || '').slice(0, 120) || null,
-        type: 'group', members: [me.name], createdAt: Date.now(),
+        type: 'group', members: [me.name], owner: me.name, createdAt: Date.now(), // 建群者即群主（@owner 落点）
         // 微信语义：默认邀请制，只有成员可见；显式 isPublic 才是开放群
         isPublic: !!body.isPublic,
       };
@@ -791,7 +816,21 @@ async function route(req, res) {
         if (!target) return json(res, 404, { error: '引用的原消息不存在或已撤回' });
         replyTo = target.seq;
       }
+      // 发送幂等（学自 CCCC 的 client_id / AgentConnect 的 stableMessageId）：
+      // webhook 重试、agent 超时重发，同一 clientId 在同频道只落一条
+      let cid = null;
+      if (body.clientId) {
+        cid = String(body.clientId).slice(0, 64);
+        const old = db.messages.find((x) => x.seq === db.dedup[ch.id + '\u0000' + cid]);
+        if (old) return json(res, 200, { message: old, duplicate: true });
+      }
       const msg = addMessage(ch.id, me.name, text, { replyTo });
+      if (cid) {
+        db.dedup[ch.id + '\u0000' + cid] = msg.seq;
+        const keys = Object.keys(db.dedup);
+        for (let i = 0; i < keys.length - 5000; i++) delete db.dedup[keys[i]]; // 映射上限 5000 条
+        save();
+      }
       maybeBotRespond(msg);
       return json(res, 200, { message: msg });
     }
@@ -812,6 +851,34 @@ async function route(req, res) {
       return json(res, 200, { ok: true });
     }
 
+    /* ---- 回执：显式认领（read）。服务端只在此处记「已读」，绝不代 runtime 作答 ---- */
+    if (p === '/api/ack' && method === 'POST') {
+      const m = db.messages.find((x) => x.seq === Number(body.seq));
+      if (!m) return json(res, 404, { error: '消息不存在' });
+      const c = channelOf(m.channel);
+      if (!c || !c.members.includes(me.name)) return json(res, 403, { error: '不在该消息的频道中' });
+      const targeted = c.type === 'dm' ||
+        routing.mentionsTarget(m.mentions, me.name, { isOwner: c.owner === me.name });
+      if (!targeted && me.kind !== 'human') return json(res, 403, { error: '只有被 @ 的成员可以确认这条消息' });
+      if (markReceipt(m, me.name, 'read')) {
+        // msgSeq 不能叫 seq：pushEvent 会用全局事件序号覆盖同名键
+        pushEvent({ type: 'receipt', msgSeq: m.seq, channel: m.channel, name: me.name, state: 'read' });
+        save();
+      }
+      return json(res, 200, { ok: true, seq: m.seq, receipts: m.receipts || {} });
+    }
+
+    /* ---- 回执查询：这条消息 @ 到的人各自走到哪一步了 ---- */
+    if (p === '/api/track' && method === 'GET') {
+      const m = db.messages.find((x) => x.seq === Number(u.searchParams.get('seq')));
+      if (!m) return json(res, 404, { error: '消息不存在' });
+      const c = channelOf(m.channel);
+      const readable = c.type === 'dm' ? c.members.includes(me.name)
+        : (c.isPublic || c.members.includes(me.name));
+      if (!readable) return json(res, 403, { error: '无权查看该频道的回执' });
+      return json(res, 200, { seq: m.seq, channel: m.channel, mentions: m.mentions, receipts: m.receipts || {} });
+    }
+
     if (p === '/api/messages' && method === 'GET') {
       ch = channelOf(u.searchParams.get('channel'));
       if (!ch) return json(res, 404, { error: '频道不存在' });
@@ -821,7 +888,7 @@ async function route(req, res) {
       const limit = Math.min(Number(u.searchParams.get('limit')) || 50, 200);
       let list = db.messages.filter((m) => m.channel === ch.id && m.seq < before);
       if (me.kind !== 'human' && ch.type === 'group' && (me.context || 'mentions') !== 'channel') {
-        list = list.filter((m) => canReadMessage(me, m)); // 上下文隔离：agent 拉不到别人的群消息
+        list = list.filter((m) => routing.canReadMessage(me, m, ch)); // 上下文隔离：agent 拉不到别人的群消息
       }
       return json(res, 200, { messages: list.slice(-limit), channel: pubChannel(ch, me.name) });
     }
@@ -842,6 +909,18 @@ async function route(req, res) {
         const evts = db.events.filter((e) => e.seq > since && visibleTo(me.name, e));
         if (evts.length) {
           since = evts[evts.length - 1].seq;
+          // runtime 亲自拉走 = 「已送达」（学 CCCC runtime.delivery：只记事实，不猜）
+          if (me.kind !== 'human') {
+            let touched = false;
+            for (const e of evts) {
+              if (e.type !== 'message' || !e.message) continue;
+              const c = channelOf(e.message.channel);
+              if (c && routing.mentionsTarget(e.message.mentions, me.name, { isOwner: c.owner === me.name })) {
+                touched = markReceipt(e.message, me.name, 'delivered') || touched;
+              }
+            }
+            if (touched) save();
+          }
           return json(res, 200, { events: evts, cursor: since });
         }
         if (db.seq < since) return json(res, 200, { events: [], cursor: db.seq, reset: true });
@@ -915,6 +994,7 @@ function pubChannel(ch, forName) {
       : ch.name,
     topic: ch.topic, members: [...ch.members], createdAt: ch.createdAt,
     isPublic: !!ch.isPublic,
+    owner: ch.type === 'group' ? (ch.owner || null) : undefined, // 前端 @owner 提示与 toast 需要
   };
 }
 

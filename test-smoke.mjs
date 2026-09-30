@@ -93,8 +93,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   ok(iso.json.me.context === 'mentions', 'agent 注册默认上下文 = mentions');
   await api('POST', '/api/messages', { channel: 'general', text: `给${rand}的无关闲聊，谁都不@` }, ht);
   const isoRead = await api('GET', `/api/messages?channel=general&limit=50`, null, iso.json.token);
+  // 无关 = 不是 @自己的；@all（及 @owner 但自己非群主）按 v0.2 语义对隔离 agent 可见，不算泄漏
   const leaked = isoRead.json.messages.some((m) => m.kind === 'text' && m.from !== `隔离员${rand}`
-    && !(m.mentions || []).includes(`隔离员${rand}`));
+    && !(m.mentions || []).includes(`隔离员${rand}`)
+    && !(m.mentions || []).includes('@all'));
   ok(!leaked, 'mentions agent 群历史里没有无关消息');
 
   /* 12. channel 上下文的 agent 可读全群；human 永远全量 */
@@ -244,6 +246,71 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   }
   ok(!!injReply, '#技能 派活 → 技能全文注入进 CLI 任务');
   await api('POST', '/api/agents/spawn-cli', { name: `注入工${rand}`, stop: true }, ht);
+
+  /* 22. routing.js 纯函数单元：token、最长名优先 */
+  const { createRequire } = await import('node:module');
+  const routing = createRequire(import.meta.url)('./routing.js');
+  const pt1 = routing.parseMentions('@all @owner @TagBot', ['TagBot']);
+  ok(pt1.includes('@all') && pt1.includes('@owner') && pt1.includes('TagBot'), 'routing.parseMentions：token 与具体名并存');
+  const pt2 = routing.parseMentions('@abc2 来了', ['abc', 'abc2']);
+  ok(pt2.length === 1 && pt2[0] === 'abc2', 'routing.parseMentions：最长名优先不被短名抢占');
+  ok(routing.mentionsTarget(['@owner'], 'gbc', { isOwner: true }) && !routing.mentionsTarget(['@owner'], 'gbc', {}), 'mentionsTarget：@owner 仅群主命中');
+
+  /* 23. @all 全员路由：token 存原文、隔离 agent 可见、回执 queued 起步、不唤醒 TagBot/托管 */
+  const resAll = await api('POST', '/api/register', { name: 'all', kind: 'agent' });
+  ok(resAll.status === 400, '注册保留字 all 被拒');
+  const seqAll = (await api('GET', '/api/health')).json.seq;
+  const allMsg = await api('POST', '/api/messages', { channel: 'general', text: `@all 全员注意：${rand}` }, ht);
+  ok(allMsg.status === 200 && allMsg.json.message.mentions.includes('@all'), '@all 存原文不展开');
+  await sleep(1300);
+  const allEvt = await api('GET', `/api/events?token=${iso.json.token}&since=${seqAll}&wait=0`);
+  ok(allEvt.json.events.some((e) => e.type === 'message' && e.message.seq === allMsg.json.message.seq), '隔离 agent 事件流收到 @all 消息');
+  const isoHist2 = await api('GET', `/api/messages?channel=general&limit=20`, null, iso.json.token);
+  ok(isoHist2.json.messages.some((m) => m.seq === allMsg.json.message.seq), '隔离 agent 历史含 @all 消息');
+  const allTrack1 = await api('GET', `/api/track?seq=${allMsg.json.message.seq}`, null, ht);
+  ok(allTrack1.json.receipts[`隔离员${rand}`] === 'delivered', '长轮询拉取后记「已送达」');
+  ok(allTrack1.json.receipts[`测试机器人${rand}`] === 'queued', '未拉取的 agent 保持「排队」');
+  await sleep(1400);
+  const allHist = await api('GET', `/api/messages?channel=general&limit=6`, null, ht);
+  ok(!allHist.json.messages.some((m) => m.ts >= allMsg.json.message.ts && (m.from === 'TagBot' || m.from === `手办${rand}`)),
+    '@all 不唤醒 TagBot 与离线托管（仅显式 @ 名字才叫醒）');
+
+  /* 24. @owner 只叫群主：非群主的隔离 agent 不可见不排队 */
+  const seqOwn = (await api('GET', '/api/health')).json.seq;
+  const ownMsg = await api('POST', '/api/messages', { channel: 'general', text: `@owner 群主过目：${rand}` }, ht);
+  ok(ownMsg.json.message.mentions.includes('@owner'), '@owner 存原文');
+  await sleep(300);
+  const ownEvt = await api('GET', `/api/events?token=${iso.json.token}&since=${seqOwn}&wait=0`);
+  ok(!ownEvt.json.events.some((e) => e.type === 'message' && e.message.seq === ownMsg.json.message.seq), '非群主的隔离 agent 收不到 @owner 事件');
+  const ownTrack = await api('GET', `/api/track?seq=${ownMsg.json.message.seq}`, null, ht);
+  ok(ownTrack.json.receipts['gbc'] === 'queued' && !Object.keys(ownTrack.json.receipts).includes(`隔离员${rand}`), '@owner 回执只落群主');
+
+  /* 25. ack 认领：显式 ack 才记「已读」，未被 @ 的 agent ack 被拒 */
+  const ackDeny = await api('POST', '/api/ack', { seq: ownMsg.json.message.seq }, iso.json.token);
+  ok(ackDeny.status === 403, '未被 @ 的 agent ack 被 403 拒绝');
+  const ack = await api('POST', '/api/ack', { seq: allMsg.json.message.seq }, iso.json.token);
+  ok(ack.status === 200 && ack.json.receipts[`隔离员${rand}`] === 'read', 'ack 后记「已读」');
+  const ackEvt = await api('GET', `/api/events?token=${encodeURIComponent(ht)}&since=${seqOwn}&wait=0`);
+  ok(ackEvt.json.events.some((e) => e.type === 'receipt' && e.msgSeq === allMsg.json.message.seq && e.name === `隔离员${rand}`), 'ack 广播 receipt 事件');
+  const allTrack2 = await api('GET', `/api/track?seq=${allMsg.json.message.seq}`, null, ht);
+  ok(allTrack2.json.receipts[`隔离员${rand}`] === 'read', 'track 视角确认已读');
+
+  /* 26. clientId 发送幂等：重发返回同一条 */
+  const cid = `smoke-${rand}`;
+  const c1 = await api('POST', '/api/messages', { channel: 'general', text: `幂等测试 ${rand}`, clientId: cid }, ht);
+  const c2 = await api('POST', '/api/messages', { channel: 'general', text: `幂等测试 ${rand}`, clientId: cid }, ht);
+  ok(c1.status === 200 && c2.status === 200 && c1.json.message.seq === c2.json.message.seq && c2.json.duplicate === true,
+    'clientId 重发返回同一条（duplicate 标记）');
+
+  /* 27. owner 生命周期：建群即群主（pubChannel 透出）→ 群主改名 @owner 落点跟随 */
+  const myGroup = await api('POST', '/api/channels', { name: `群主测${rand}`, members: [`隔离员${rand}`] }, ht);
+  ok(myGroup.json.channel.owner === human.json.me.name, '建群者即群主（pubChannel 透出 owner）');
+  const tmpHuman = await api('POST', '/api/register', { name: `临时群主${rand}`, kind: 'human' });
+  const g2 = await api('POST', '/api/channels', { name: `群主改${rand}` }, tmpHuman.json.token);
+  await api('POST', '/api/agents/rename', { from: `临时群主${rand}`, to: `新群主${rand}` }, tmpHuman.json.token);
+  const g2state = await api('GET', '/api/state', null, tmpHuman.json.token);
+  const g2c = g2state.json.channels.find((c) => c.id === g2.json.channel.id);
+  ok(g2c && g2c.owner === `新群主${rand}`, '群主改名后 @owner 落点跟随新名');
 
   console.log(`\n结果：${pass} 通过，${fail} 失败`);
   process.exit(fail ? 1 : 0);
