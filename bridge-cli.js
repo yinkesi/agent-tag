@@ -24,6 +24,7 @@
 const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const routing = require('./routing.js'); // @ 提及剥离纯函数（名字可含正则元字符，不能用 RegExp 拼）
 
 // 持证重登：bridge 重启不丢身份（token 存本地）
 function savedToken(name) {
@@ -159,7 +160,7 @@ function runCli(task) {
           channel: m.channel,
           channelName: byId.get(m.channel).name,
           from: m.from,
-          text: (m.text.replace(new RegExp(`@${NAME}`, 'g'), '').trim() || '（没有任务描述，请汇报你的能力）')
+          text: (routing.stripMention(m.text, NAME).trim() || '（没有任务描述，请汇报你的能力）')
             + (skillBlock || '') + kbHint,
         });
       }

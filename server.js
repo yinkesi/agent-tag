@@ -414,13 +414,20 @@ function fireWebhook(agent, msg, attempt = 1) {
   });
   const url = agent.webhookUrl;
   const MAX_TRY = 3;
-  const retry = (reason) => {
+  // 重入保护：一次投递只允许一个终态。超时路径里 abort() 的 req.destroy() 会再触发 'error'，
+  // 不加守卫的话同一失败会排出两条指数退避链（重试与重复投递双双翻倍）。
+  let settled = false;
+  const finish = (reason) => {
+    if (settled) return; // 第二个终态（如 timeout 之后跟进的 error）直接丢弃
+    settled = true;
+    clearTimeout(timeout); // 所有终态路径（成功/4xx/5xx/超时/出错/同步异常）统一清 5s 兜底定时器
+    if (reason === null) return; // 成功或 4xx 这类不该重试的终态
     if (attempt >= MAX_TRY) return logHook(agent.name, url, `GIVEUP(${attempt}) ${reason}`);
     const delay = 1000 * 4 ** (attempt - 1); // 1s / 4s / 16s
     logHook(agent.name, url, `RETRY ${attempt}->${attempt + 1} in ${delay}ms (${reason})`);
     setTimeout(() => fireWebhook(agent, msg, attempt + 1), delay);
   };
-  const timeout = setTimeout(abort, 5000);
+  const timeout = setTimeout(abort, 5000); // 5s 兜底：socket timeout 事件之外的第二道保险
   function abort() { try { req.destroy(); } catch {} }
   let req;
   try {
@@ -439,17 +446,19 @@ function fireWebhook(agent, msg, attempt = 1) {
       logHook(agent.name, url, res.statusCode);
       if (res.statusCode >= 200 && res.statusCode < 300) {
         if (markReceipt(msg, agent.name, 'delivered')) save(); // 对端确认收到，才配得上「已送达」
+        finish(null);
       } else if (res.statusCode >= 500) {
-        retry('HTTP ' + res.statusCode); // 5xx 才值得重试；4xx 是调用方的问题
+        finish('HTTP ' + res.statusCode); // 5xx 才值得重试；4xx 是调用方的问题
+      } else {
+        finish(null); // 4xx：终态，不重试
       }
     });
-    req.on('timeout', () => { abort(); retry('timeout'); });
-    req.on('error', (e) => retry(e.message));
+    req.on('timeout', () => { abort(); finish('timeout'); }); // destroy 引发的 error 会被 settled 挡下
+    req.on('error', (e) => finish(e.message));
     req.end(body);
   } catch (e) {
     logHook(agent.name, url, 'ERR ' + e.message);
-    clearTimeout(timeout);
-    retry(e.message);
+    finish(e.message);
   }
 }
 
@@ -516,7 +525,8 @@ function maybeBotRespond(msg) {
     if (ch0 && ch0.type === 'dm' && !ch0.members.includes(name)) { ch0.members.push(name); }
     setTimeout(() => pushEvent({ type: 'typing', channel, from: name }), 200);
     setTimeout(() => {
-      const task = msg.text.replace(new RegExp(`@${name}`, 'g'), '').trim();
+      // 零正则剥离 @提及：名字可含 ( + 等元字符，拼 RegExp 会 SyntaxError 直接炸崩进程
+      const task = routing.stripMention(msg.text, name).trim();
       addMessage(channel, name,
         `（离线托管应答）@${msg.from} 收到：${task.slice(0, 60) || '（无正文）'}。真实程序持 token 接入后由它接管回帖。`);
     }, 600 + Math.random() * 400);

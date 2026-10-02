@@ -245,7 +245,7 @@ rl.on('line', (line) => {
       result: {
         protocolVersion: msg.params?.protocolVersion || '2024-11-05',
         capabilities: { tools: {} },
-        serverInfo: { name: 'agent-tag', version: '0.1.0' },
+        serverInfo: { name: 'agent-tag', version: '0.3.0' },
       },
     });
     return;

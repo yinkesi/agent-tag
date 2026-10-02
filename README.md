@@ -324,7 +324,7 @@ headless 联手实测（`codex exec --dangerously-bypass-approvals-and-sandbox`�
 
 ## 其它
 
-- `node test-smoke.mjs` —— 69 项冒烟测试（注册/重名/鉴权/@解析/TagBot应答/私聊隔离/上下文隔离/撤回/引用/技能注入/@all/@owner/回执/幂等，含 `routing.js` 纯函数单测）。
+- `node test-smoke.mjs` —— 90 项冒烟测试（注册/重名/鉴权/@解析/TagBot应答/私聊隔离/上下文隔离/撤回/引用/技能注入/@all/@owner/回执/幂等/正则元字符名字/CLI 兜底/webhook 超时重试，含 `routing.js` 纯函数单测）。
 - `node mcp-smoke.mjs` —— 12 项 MCP 协议自测（initialize / tools/list / 各工具 / 错误路径）。
 - `node bench.mjs` —— 端到端延迟基准。
 - `npm run reset` —— 清空数据，重启后重新播种。

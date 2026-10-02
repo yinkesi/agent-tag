@@ -379,10 +379,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const tAuto = Date.now();
   await api('POST', '/api/messages', { channel: 'general', text: `@自ack工${rand} 认领测试` }, ht);
   // 先取到任务消息的 seq，再轮询它的回执
+  // 注意用 >=：localhost 往返可 <1ms，消息 ts 可能与 tAuto 同毫秒，严格 > 会漏判（竞态）
   let autoTargetSeq = null;
   for (let i = 0; i < 6 && !autoTargetSeq; i++) {
     const dm = await api('GET', `/api/messages?channel=general&limit=5`, null, ht);
-    autoTargetSeq = (dm.json.messages || []).find((m) => m.text.includes('认领测试') && m.from === human.json.me.name && m.ts > tAuto)?.seq ?? null;
+    autoTargetSeq = (dm.json.messages || []).find((m) => m.text.includes('认领测试') && m.from === human.json.me.name && m.ts >= tAuto)?.seq ?? null;
     if (!autoTargetSeq) await sleep(300);
   }
   let autoRead = null;
@@ -393,6 +394,77 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   }
   ok(!!autoRead, 'bridge-cli 认领任务后自动记「已读」（✓✓ 闭环）');
   await api('POST', '/api/agents/spawn-cli', { name: `自ack工${rand}`, stop: true }, ht);
+
+  /* 32. 正则元字符名字（Bug 修复）：TagBot/离线托管应答不再被 RegExp 元字符炸崩 */
+  const parenName = `括号员(${rand}`; // ( 会让 new RegExp 直接抛 SyntaxError（setTimeout 内未捕获 → 进程崩）
+  const plusName = `加号a+b${rand}`;  // + 不抛但静默错配（a+ 把 a 量词化）
+  const p1 = await api('POST', '/api/register', { name: parenName, kind: 'agent', autoReply: true });
+  const p2 = await api('POST', '/api/register', { name: plusName, kind: 'agent', autoReply: true });
+  ok(p1.status === 200 && p2.status === 200, '正则元字符名字可注册（含 ( 与 a+b）');
+  const t32 = Date.now();
+  await api('POST', '/api/messages', { channel: 'general', text: `@TagBot @${parenName} 订会议室 @${plusName} 也看看` }, ht);
+  await sleep(2400);
+  const alive32 = await api('GET', '/api/health').catch(() => null);
+  ok(!!alive32 && alive32.status === 200, '元字符名字应答触发后服务仍存活（进程不崩）');
+  const metaRead = await api('GET', `/api/messages?channel=general&limit=8`, null, ht);
+  const tb32 = metaRead.json.messages.find((m) => m.from === 'TagBot' && m.ts > t32);
+  const guardP = metaRead.json.messages.find((m) => m.from === parenName && m.ts > t32);
+  const guardQ = metaRead.json.messages.find((m) => m.from === plusName && m.ts > t32);
+  ok(!!tb32, '同一条消息里 TagBot 应答正常');
+  ok(!!guardP && guardP.text.includes('订会议室') && !guardP.text.includes(`@${parenName}`),
+    '含 ( 名字的离线托管应答正常且 @提及 已剥离');
+  ok(!!guardQ && guardQ.text.includes('也看看') && !guardQ.text.includes(`@${plusName}`),
+    'a+b 名字的离线托管应答正常且 @提及 已剥离');
+
+  /* 33. headless CLI 按群名兜底（Bug 修复：404 快速路径失败后全量拉 state 解析，原 resolveChannelLazy 未定义） */
+  const { spawnSync } = await import('node:child_process');
+  const { fileURLToPath } = await import('node:url');
+  const cliPath = fileURLToPath(new URL('./cli.js', import.meta.url));
+  const cliGroupName = `CLI冒烟群${rand}`;
+  const cliGrp = await api('POST', '/api/channels', { name: cliGroupName, isPublic: true }, ht);
+  ok(cliGrp.status === 200 && cliGrp.json.channel.isPublic === true, '为 CLI 测试建开放群');
+  const cliName = `cli客${rand}`;
+  const cliText = `cli端到端${rand}`;
+  const cliRun = spawnSync(process.execPath, [
+    cliPath, '--server', BASE, '--name', cliName, 'send', '-c', cliGroupName, cliText,
+  ], { encoding: 'utf8', timeout: 30000 });
+  ok(cliRun.status === 0, 'cli.js send <自定义新群名> 退出码 0',
+    `stderr=${(cliRun.stderr || '').trim()} stdout=${(cliRun.stdout || '').trim()}`);
+  const cliDb = await api('GET', `/api/messages?channel=${encodeURIComponent(cliGrp.json.channel.id)}&limit=10`, null, ht);
+  ok((cliDb.json.messages || []).some((m) => m.text === cliText && m.from === cliName),
+    'CLI 按群名兜底发送后消息已落库');
+  const cliReadRun = spawnSync(process.execPath, [
+    cliPath, '--server', BASE, '--name', cliName, 'read', '-c', cliGroupName, '-n', '5',
+  ], { encoding: 'utf8', timeout: 30000 });
+  ok(cliReadRun.status === 0 && cliReadRun.stdout.includes(cliText), 'cli.js read <自定义新群名> 兜底可读回消息');
+
+  /* 34. webhook 超时单次重试（Bug 修复：timeout+error 双重 retry 排出两条退避链、5s 兜底定时器不清理） */
+  const hook2Hits = [];
+  const slowSrv = (await import('node:http')).createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => (body += c));
+    req.on('end', () => {
+      hook2Hits.push(Date.now());
+      if (hook2Hits.length === 1) return; // 首次挂住不回，逼出客户端 5s 超时；之后立即 200
+      res.statusCode = 200;
+      res.end('ok');
+    });
+  });
+  await new Promise((r) => slowSrv.listen(0, '127.0.0.1', r));
+  const slowPort = slowSrv.address().port;
+  await api('POST', '/api/register', {
+    name: `慢钩员${rand}`, kind: 'agent', webhookUrl: `http://127.0.0.1:${slowPort}/slow`,
+  }, ht);
+  await api('POST', '/api/messages', { channel: 'general', text: `@慢钩员${rand} 超时重试` }, ht);
+  await sleep(8500); // 覆盖 5s 超时 + 1s 退避 + 重试成功，留裕量（双重链会让到达数翻倍）
+  slowSrv.close();
+  if (slowSrv.closeAllConnections) slowSrv.closeAllConnections();
+  ok(hook2Hits.length === 2, '超时后恰好重试一次（2 次到达，无双重退避链）',
+    `hits=${hook2Hits.length}`);
+  if (hook2Hits.length >= 2) {
+    const delta = hook2Hits[1] - hook2Hits[0];
+    ok(delta >= 5500 && delta <= 8000, '重试间隔 ≈ 5s 超时 + 1s 退避', `delta=${delta}ms`);
+  } else ok(false, '重试间隔（到达请求不足两次）');
 
   console.log(`\n结果：${pass} 通过，${fail} 失败`);
   process.exit(fail ? 1 : 0);

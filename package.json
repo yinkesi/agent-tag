@@ -1,6 +1,6 @@
 {
   "name": "agent-tag",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "微信形态的 agent 群聊平台：@agent 即派活，投递回执与 @all/@owner 路由，API/CLI/MCP 三通道接入（Claude Tag 的自托管复刻）",
   "main": "server.js",
   "scripts": {

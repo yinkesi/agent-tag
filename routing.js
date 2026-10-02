@@ -42,6 +42,25 @@ function parseMentions(text, agentNames) {
 }
 
 /**
+ * 从文本中移除所有 @name 提及（零正则实现，纯字符串扫描）。
+ * 名字可含 ( ) + * 等正则元字符：拼 RegExp 要么抛 SyntaxError（未配对括号）要么静默错配（a+b），
+ * 这里与 parseMentions 同为「@+名字 前缀消费」语义，字面量查找，行为与正则转义后等价。
+ */
+function stripMention(text, name) {
+  const s = String(text);
+  const token = '@' + String(name);
+  if (token.length < 2) return s; // 空名无事可做
+  let out = '';
+  let i = 0;
+  while (i < s.length) {
+    if (s.startsWith(token, i)) { i += token.length; continue; }
+    out += s[i];
+    i++;
+  }
+  return out;
+}
+
+/**
  * name 是否是这条 mentions 的投递对象（读时展开的唯一裁判）：
  *   具体名命中        —— @小王
  *   '@all'            —— 全频道成员
@@ -86,4 +105,4 @@ function canReadMessage(a, m, ch) {
   return mentionsTarget(m.mentions, a.name, { isOwner: !!ch && ch.owner === a.name });
 }
 
-module.exports = { TOKENS, RESERVED, parseMentions, mentionsTarget, expandMentions, canReadMessage };
+module.exports = { TOKENS, RESERVED, parseMentions, stripMention, mentionsTarget, expandMentions, canReadMessage };

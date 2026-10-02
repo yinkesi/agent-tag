@@ -206,11 +206,15 @@ async function headlessMain(sub) {
       const text = (arg('text', null) || posArgs().join(' ')).trim();
       if (!text) { console.error(C.red('用法: cli.js send [-c <群名|id>] <文本...>')); process.exit(1); }
       const ref = arg('channel') || arg('c') || 'general';
-      // 快速路径：先当频道 id 直接发，404 才回头解析群名（省一次 state RTT）
+      // 快速路径：先当频道 id 直接发，404 才回头解析群名（省一次 state RTT）。
+      // 兜底必须落到全量拉取：headless send 不预拉 state，S.channels 为空时 findChannel 必扑空
+      // （原此处引用未定义的 resolveChannelLazy，直接 ReferenceError）
       let r = await req('POST', `/api/messages?token=${encodeURIComponent(S.token)}`, { channel: ref, text });
       if (r.status === 404) {
-        const ch = findChannel(ref) || resolveChannelLazy(ref);
-        if (!ch || typeof ch === 'string') { console.error(C.red('✗ 找不到会话 ' + ref)); process.exit(1); }
+        try { await refreshState(); }
+        catch (e) { console.error(C.red('✗ 拉取会话列表失败: ' + e.message)); process.exit(1); }
+        const ch = findChannel(ref);
+        if (!ch) { console.error(C.red('✗ 找不到会话 ' + ref)); process.exit(1); }
         r = await req('POST', `/api/messages?token=${encodeURIComponent(S.token)}`, { channel: ch.id, text });
       }
       if (r.status !== 200) { console.error(C.red('✗ ' + (r.json.error || '发送失败'))); process.exit(1); }
@@ -223,6 +227,8 @@ async function headlessMain(sub) {
       const limit = Number(arg('limit') || arg('n') || 20);
       let r = await req('GET', `/api/messages?token=${encodeURIComponent(S.token)}&channel=${encodeURIComponent(ref)}&limit=${limit}`);
       if (r.status === 404) {
+        try { await refreshState(); } // 同 send：按名兜底必须全量拉一次，S.channels 空时 findChannel 查不到
+        catch (e) { console.error(C.red('✗ 拉取会话列表失败: ' + e.message)); process.exit(1); }
         const ch = findChannel(ref);
         if (!ch) { console.error(C.red('✗ 找不到会话 ' + ref)); process.exit(1); }
         r = await req('GET', `/api/messages?token=${encodeURIComponent(S.token)}&channel=${encodeURIComponent(ch.id)}&limit=${limit}`);
