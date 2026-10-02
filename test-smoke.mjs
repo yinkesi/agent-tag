@@ -393,6 +393,47 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     if (tk.json.receipts?.[`自ack工${rand}`] === 'read') autoRead = tk.json;
   }
   ok(!!autoRead, 'bridge-cli 认领任务后自动记「已读」（✓✓ 闭环）');
+
+  /* 32. 工匠 CR 五连修的回归（真实任务发现的真实 bug） */
+  // #1 @all 发送者不给自己记回执：agent 发 @all 后自己拉事件，track 无幽灵 delivered；ack 自己的被拒
+  const crSender = await api('POST', '/api/register', { name: `发广${rand}`, kind: 'agent' }, ht);
+  const crSend = await api('POST', '/api/messages', { channel: 'general', text: '@all 广播自查' }, crSender.json.token);
+  await api('GET', `/api/events?token=${encodeURIComponent(crSender.json.token)}&since=${crSend.json.message.seq - 1}&wait=0`);
+  const crT1 = await api('GET', `/api/track?seq=${crSend.json.message.seq}`, null, ht);
+  ok(crT1.json.receipts[`发广${rand}`] === undefined, 'CR#1：@all 发送者拉事件不产生幽灵 delivered');
+  const crAckSelf = await api('POST', '/api/ack', { seq: crSend.json.message.seq }, crSender.json.token);
+  ok(crAckSelf.status === 400, 'CR#1：不能认领自己发的消息');
+  // #4 token 边界：@allice 归 allice，不再吞成 @all
+  const { createRequire: cr2 } = await import('node:module');
+  const rt2 = createRequire(import.meta.url)('./routing.js');
+  ok(rt2.parseMentions('@allice 在吗', ['allice']).join() === 'allice', 'CR#4：@allice 不被 @all 吞掉');
+  ok(rt2.parseMentions('@all 出发', ['allice']).join() === '@all', 'CR#4：@all 后跟中文仍是 token');
+  // #5 track 对已删频道容错（用不存在的 channel 场景难构造，退而验证 404 分支的判空入口：坏 seq）
+  const cr404 = await api('GET', `/api/track?seq=999999999`, null, ht);
+  ok(cr404.status === 404, 'CR#5：track 未知消息 404（不再 500）');
+  // #3 改名迁移 receipts 键：发一条 @某agent（queued），改名后 track 显示新键
+  const crA = await api('POST', '/api/register', { name: `回执甲${rand}`, kind: 'agent' }, ht);
+  const crM = await api('POST', '/api/messages', { channel: 'general', text: `@回执甲${rand} 待改名` }, ht);
+  await api('POST', '/api/agents/rename', { from: `回执甲${rand}`, to: `回执乙${rand}` }, ht);
+  const crT3 = await api('GET', `/api/track?seq=${crM.json.message.seq}`, null, ht);
+  ok(crT3.json.receipts[`回执乙${rand}`] === 'queued' && crT3.json.receipts[`回执甲${rand}`] === undefined,
+    'CR#3：改名后回执键迁移到新名');
+  // #2 熔断压制事件流：预置连续 agent 发言后，被 @ 的隔离 agent 事件流里看不到新消息
+  const crF1 = await api('POST', '/api/register', { name: `乒乓甲${rand}`, kind: 'agent' }, ht);
+  const crF2 = await api('POST', '/api/register', { name: `乒乓乙${rand}`, kind: 'agent' }, ht);
+  const crG = await api('POST', '/api/channels', { name: `乒乓间${rand}`, members: [`乒乓甲${rand}`, `乒乓乙${rand}`] }, ht);
+  const cg = crG.json.channel.id;
+  for (let i = 0; i < 8; i++) {
+    await api('POST', '/api/messages', { channel: cg, text: `对拉 ${i}` }, i % 2 ? crF1.json.token : crF2.json.token);
+  }
+  const crSeq = (await api('GET', '/api/health')).json.seq;
+  const crTrip = await api('POST', '/api/messages', { channel: cg, text: `@乒乓乙${rand} 接不住了吧` }, crF1.json.token);
+  await sleep(300);
+  const crEv = await api('GET', `/api/events?token=${encodeURIComponent(crF2.json.token)}&since=${crSeq}&wait=0`);
+  const crGot = (crEv.json.events || []).some((e) => e.type === 'message' && e.message.seq === crTrip.json.message.seq);
+  ok(!crGot, 'CR#2：熔断后长轮询 agent 收不到该 @ 事件（真熔断）');
+  const crT2 = await api('GET', `/api/track?seq=${crTrip.json.message.seq}`, null, ht);
+  ok(crT2.json.receipts[`乒乓乙${rand}`] === undefined, 'CR#2：熔断消息不排队（回执一致）');
   await api('POST', '/api/agents/spawn-cli', { name: `自ack工${rand}`, stop: true }, ht);
 
   /* 32. 正则元字符名字（Bug 修复）：TagBot/离线托管应答不再被 RegExp 元字符炸崩 */

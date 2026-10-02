@@ -25,11 +25,15 @@ function parseMentions(text, agentNames) {
   const names = [...agentNames].sort((a, b) => b.length - a.length);
   const found = [];
   let i = 0;
+  const NAME_CHAR = /[A-Za-z0-9_-]/; // token 的「延续字符」：后面跟这些就不算 token（@allice ≠ @all+ice）
   while (i < norm.length) {
     if (norm[i] !== '@') { i++; continue; }
     let hit = null;
     for (const t of TOKENS) {
-      if (norm.startsWith(t, i)) { hit = t; break; }
+      if (!norm.startsWith(t, i)) continue;
+      const after = norm[i + t.length];
+      if (after && NAME_CHAR.test(after)) continue; // @allice/@ownership：token 只是前缀，让位给具体名
+      hit = t; break;
     }
     if (!hit) {
       for (const n of names) {

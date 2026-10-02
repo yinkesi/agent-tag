@@ -300,6 +300,12 @@ function visibleTo(name, evt) {
     if (!ch) return false;
     if (ch.type === 'dm') return ch.members.includes(name);
     if (!(ch.isPublic || ch.members.includes(name))) return false; // 邀请制群：非成员不可见
+    // 熔断压制（CR#2）：tripped 的消息对其他 agent 在事件流里不可见——
+    // 否则长轮询桥照样收到 @ 照样回帖，MAX_AGENT_CHAIN 形同虚设（人/发送者不受限）
+    if (evt.message.suppressed && evt.message.from !== name) {
+      const a0 = db.agents[name];
+      if (a0 && a0.kind !== 'human') return false;
+    }
     const a = db.agents[name];
     if (!a || a.kind === 'human' || (a.context || 'mentions') === 'channel') return true;
     return routing.canReadMessage(a, evt.message, ch); // 上下文隔离的 agent 只收与自己相关的事件
@@ -359,6 +365,7 @@ function addMessage(channel, from, text, opts = {}) {
     receipts: {},
     skills,
     replyTo: opts.replyTo || undefined,
+    suppressed: tripped || undefined, // 熔断标记（落盘）：事件流对其他 agent 不可见，见 visibleTo（CR#2）
     ts: Date.now(),
     fromKind,
     hue: opts.hue ?? hueOf(from),
@@ -750,6 +757,11 @@ async function route(req, res) {
       for (const m of db.messages) {
         if (m.from === from) m.from = to; // 历史消息跟随新名字（微信语义）
         if (m.mentions) m.mentions = m.mentions.map((n) => (n === from ? to : n));
+        // 回执表以名字为键，同步迁移（CR#3），否则旧名成幽灵、新名另起炉灶
+        if (m.receipts && m.receipts[from] !== undefined) {
+          m.receipts[to] = m.receipts[from];
+          delete m.receipts[from];
+        }
       }
       const sp = spawnedBridges.get(from);
       if (sp) { spawnedBridges.delete(from); spawnedBridges.set(to, sp); }
@@ -919,6 +931,7 @@ async function route(req, res) {
     if (p === '/api/ack' && method === 'POST') {
       const m = db.messages.find((x) => x.seq === Number(body.seq));
       if (!m) return json(res, 404, { error: '消息不存在' });
+      if (m.from === me.name) return json(res, 400, { error: '不能认领自己发的消息（@all 也不例外，CR#1）' });
       const c = channelOf(m.channel);
       if (!c || !c.members.includes(me.name)) return json(res, 403, { error: '不在该消息的频道中' });
       const targeted = c.type === 'dm' ||
@@ -937,6 +950,7 @@ async function route(req, res) {
       const m = db.messages.find((x) => x.seq === Number(u.searchParams.get('seq')));
       if (!m) return json(res, 404, { error: '消息不存在' });
       const c = channelOf(m.channel);
+      if (!c) return json(res, 404, { error: '频道不存在' }); // 对齐 /api/ack 的防护（CR#5），否则空指针 500
       const readable = c.type === 'dm' ? c.members.includes(me.name)
         : (c.isPublic || c.members.includes(me.name));
       if (!readable) return json(res, 403, { error: '无权查看该频道的回执' });
@@ -978,6 +992,7 @@ async function route(req, res) {
           let touched = false;
           for (const e of evts) {
             if (e.type !== 'message' || !e.message) continue;
+            if (e.message.from === me.name) continue; // 发送者拉到自己的 @all 不算自己的送达（CR#1）
             const c = channelOf(e.message.channel);
             if (c && routing.mentionsTarget(e.message.mentions, me.name, { isOwner: c.owner === me.name })) {
               touched = markReceipt(e.message, me.name, 'delivered') || touched;

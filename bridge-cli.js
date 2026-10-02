@@ -75,6 +75,7 @@ async function api(path, body, method = 'POST') {
 let busy = false;
 const queue = [];
 
+let tokenRef = null; // 主循环注册后填入，runCli 心跳要用
 function runCli(task) {
   return new Promise((resolve) => {
     const started = Date.now();
@@ -89,17 +90,23 @@ function runCli(task) {
     child.stdout.on('data', (d) => (out += d));
     child.stderr.on('data', (d) => (err += d));
     child.on('error', (e) => resolve(`（CLI 启动失败：${e.message}）`));
+    // 执行中心跳：每 30s 重发一次 typing，群里能看见「正在输入」而非静默几分钟
+    const hb = setInterval(() => {
+      api('/api/typing', { token: tokenRef, channel: task.channel }).catch(() => {});
+    }, 30_000);
     const killer = setTimeout(() => {
       log(`✗ 任务 ${task.id} 超时（${TIMEOUT_S}s），终止`);
       try { child.kill('SIGKILL'); } catch {}
+      clearInterval(hb);
       resolve(`（任务超过 ${TIMEOUT_S}s 被终止。已产出内容如下：\n${out.slice(-1500) || '无'}`);
     }, TIMEOUT_S * 1000);
     child.on('close', (code) => {
       clearTimeout(killer);
+      clearInterval(hb);
       log(`■ 任务 ${task.id} 结束，exit=${code}，用时 ${((Date.now() - started) / 1000).toFixed(1)}s`);
-      const text = (out.trim() || err.trim() || '').slice(0, 3500);
+      const text = (out.trim() || err.trim() || '').slice(0, 3900); // 服务端消息上限 4000，留余量
       if (!text) return resolve(`（CLI 没有输出，exit=${code}）`);
-      resolve(text + (out.trim().length > 3500 ? '\n…（过长已截断）' : ''));
+      resolve(text + (out.trim().length > 3900 ? '\n…（过长已截断）' : ''));
     });
     if (USE_STDIN) {
       child.stdin.write(task.text + '\n');
@@ -113,6 +120,7 @@ function runCli(task) {
 (async () => {
   const reg = await api('/api/register', { name: NAME, kind: 'agent', persona: PERSONA, token: TOKEN_ARG || savedToken(NAME) || undefined });
   const token = reg.token;
+  tokenRef = token;
   const ME = reg.me || {}; // 含默认技能 skills[]
   rememberToken(NAME, token);
   log(`✓ 已注册 ${NAME} → ${SERVER}${(ME.skills || []).length ? `（默认技能：${ME.skills.join('、')}）` : ''}`);
