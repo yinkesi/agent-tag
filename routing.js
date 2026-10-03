@@ -51,7 +51,7 @@ function parseMentions(text, agentNames) {
  * 这里与 parseMentions 同为「@+名字 前缀消费」语义，字面量查找，行为与正则转义后等价。
  */
 function stripMention(text, name) {
-  const s = String(text);
+  const s = String(text).normalize('NFC'); // 与 parseMentions 同口径：NFD 输入也要能剥离
   const token = '@' + String(name);
   if (token.length < 2) return s; // 空名无事可做
   let out = '';
